@@ -554,7 +554,7 @@ function renderHome(){
       const g=cache.groups.find(x=>x.id===e.groupId);
       const t=cache.teachers.find(x=>x.id===e.teacherId);
       if(e.type==="monthly") return `<span class="chip">شهري ${money(e.monthlyPrice||0)} · ${sanitize(g?.name||"")} · ${sanitize(t?.name||"")}</span>`;
-      return `<span class="chip">${studentBillableCount(s,e)} حصة × ${money(e.sessionRate||0)} · ${sanitize(g?.name||"")} · ${sanitize(t?.name||"")}</span>`;
+      return `<span class="chip">${studentBillableCount(s,e)} حصة × ${money(e.sessionRate||0)}${e.packageSessions?` (باقة ${e.packageSessions})`:""} · ${sanitize(g?.name||"")} · ${sanitize(t?.name||"")}</span>`;
     }).join(" ")||`<span class="chip yellow">بدون ربط</span>`;
     let sessHtml="";
     (s.enrollments||[]).forEach(e=>{
@@ -857,7 +857,7 @@ function renderStudentsManage(){
     const ens=(s.enrollments||[]).map(e=>{
       const g=cache.groups.find(x=>x.id===e.groupId);
       if(e.type==="monthly") return `<span class="chip">شهري ${money(e.monthlyPrice||0)} · ${sanitize(g?.name||"")}</span>`;
-      return `<span class="chip">${money(e.sessionRate||0)} ج/حصة · ${sanitize(g?.name||"")}</span>`;
+      return `<span class="chip">${e.packageSessions?`${e.packageSessions} حصة بـ ${money(e.packageTotal||((e.sessionRate||0)*(e.packageSessions||0)))} (${money(e.sessionRate||0)}/حصة)`:`${money(e.sessionRate||0)} ج/حصة`} · ${sanitize(g?.name||"")}</span>`;
     }).join(" ")||`<span class="chip yellow">بدون حساب/مجموعة</span>`;
     return `<div class="list-item ${isPaused(s)?"closed":""}">
       <div style="flex:1;min-width:140px">
@@ -913,8 +913,13 @@ function openStudentForm(id){
           <option value="monthly" ${type==="monthly"?"selected":""}>بالشهر</option>
         </select>
       </div>
-      <div class="form-group" id="sRateBox"><label>مبلغ الحصة (ج)</label>
-        <input type="number" id="sRate" min="0" value="${en?.sessionRate??50}"></div>
+      <div class="form-group" id="sPackTotalBox"><label>إجمالي مبلغ الباقة (ج)</label>
+        <input type="number" id="sPackTotal" min="0" value="${en?.packageTotal ?? ((en?.sessionRate||0)*(en?.packageSessions||0)) || 400}" oninput="calcStudentSessionRate()"></div>
+      <div class="form-group" id="sPackCntBox"><label>عدد حصص الباقة</label>
+        <input type="number" id="sPackCnt" min="1" value="${en?.packageSessions ?? 8}" oninput="calcStudentSessionRate()"></div>
+      <div class="form-group" id="sRateBox"><label>سعر الحصة (محسوب تلقائياً)</label>
+        <input type="number" id="sRate" min="0" value="${en?.sessionRate??50}" readonly style="background:#f0f4f8">
+        <p id="sRateHint" style="font-size:11px;color:var(--muted);margin-top:4px">الإجمالي ÷ عدد الحصص</p></div>
       <div class="form-group hide" id="sMonthBox"><label>قيمة الشهر (ج)</label>
         <input type="number" id="sMonth" min="0" value="${en?.monthlyPrice??200}"></div>
       <div class="form-group hide" id="sStartBox"><label>بداية الاشتراك الشهري</label>
@@ -926,13 +931,26 @@ function openStudentForm(id){
   `,`<button class="btn btn-outline btn-sm" onclick="closeModal()">إلغاء</button>
     <button class="btn btn-primary btn-sm" onclick="saveStudent('${id||""}')">حفظ</button>`);
   onSBillType();
+  calcStudentSessionRate();
 }
 function onSBillType(){
   const t=$("sBillType")?.value;
-  $("sRateBox")?.classList.toggle("hide",t==="monthly");
-  $("sMonthBox")?.classList.toggle("hide",t!=="monthly");
-  $("sStartBox")?.classList.toggle("hide",t!=="monthly");
+  const isM=t==="monthly";
+  $("sPackTotalBox")?.classList.toggle("hide",isM);
+  $("sPackCntBox")?.classList.toggle("hide",isM);
+  $("sRateBox")?.classList.toggle("hide",isM);
+  $("sMonthBox")?.classList.toggle("hide",!isM);
+  $("sStartBox")?.classList.toggle("hide",!isM);
+  if(!isM) calcStudentSessionRate();
 }
+function calcStudentSessionRate(){
+  const total=Number($("sPackTotal")?.value)||0;
+  const cnt=Math.max(1,Number($("sPackCnt")?.value)||1);
+  const rate=Math.round((total/cnt)*100)/100;
+  if($("sRate")) $("sRate").value=rate;
+  if($("sRateHint")) $("sRateHint").textContent=`${total} ÷ ${cnt} = ${rate} ج للحصة`;
+}
+
 async function saveStudent(id){
   if(!requirePerm("addStudent")) return;
   const name=$("sName").value.trim();
@@ -949,7 +967,13 @@ async function saveStudent(id){
     const type=$("sBillType").value;
     const entry={groupId,teacherId,type,chargeOnAbsence:!!$("sAbs")?.checked,enrolledAt:todayISO()};
     if(type==="monthly"){entry.monthlyPrice=Number($("sMonth").value)||0;entry.startDate=$("sStart").value||todayISO()}
-    else entry.sessionRate=Number($("sRate").value)||0;
+    else {
+      const packTotal=Number($("sPackTotal")?.value)||0;
+      const packCnt=Math.max(1,Number($("sPackCnt")?.value)||1);
+      entry.packageTotal=packTotal;
+      entry.packageSessions=packCnt;
+      entry.sessionRate=Math.round((packTotal/packCnt)*100)/100 || Number($("sRate")?.value)||0;
+    }
     const i=enrollments.findIndex(e=>e.groupId===groupId);
     if(i>=0) enrollments[i]=entry; else enrollments.push(entry);
   }
@@ -969,7 +993,9 @@ function downloadStudentsTemplate(){
     "ولي_الأمر":"محمد",
     "اسم_المجموعة":"حلقة المساء",
     "طريقة_الحساب":"حصة",
-    "مبلغ_الحصة":50,
+    "اجمالي_الباقة":400,
+    "عدد_حصص_الباقة":8,
+    "مبلغ_الحصة":"(تلقائي)",
     "قيمة_الشهر":"",
     "بداية_الاشتراك":"",
     "محاسبة_الغياب":"لا"
@@ -1014,7 +1040,10 @@ async function importStudentsExcel(ev){
       const gName=String(row["اسم_المجموعة"]||row["المجموعة"]||"").trim();
       const billRaw=String(row["طريقة_الحساب"]||row["الحساب"]||"حصة").trim();
       const isMonth=/شهر|monthly/i.test(billRaw);
-      const rate=Number(row["مبلغ_الحصة"]||row["سعر_الحصة"]||0)||0;
+      const packTotal=Number(row["اجمالي_الباقة"]||row["إجمالي_الباقة"]||row["اجمالي"]||0)||0;
+      const packCnt=Math.max(1,Number(row["عدد_حصص_الباقة"]||row["عدد_الحصص"]||8)||8);
+      let rate=Number(row["مبلغ_الحصة"]||row["سعر_الحصة"]||0)||0;
+      if(packTotal>0) rate=Math.round((packTotal/packCnt)*100)/100;
       const monthPrice=Number(row["قيمة_الشهر"]||row["الاشتراك"]||0)||0;
       const start=String(row["بداية_الاشتراك"]||"").trim()||todayISO();
       const absRaw=String(row["محاسبة_الغياب"]||"").trim();
@@ -1027,7 +1056,7 @@ async function importStudentsExcel(ev){
           if(teacherId&&!isPaused(cache.teachers.find(x=>x.id===teacherId))){
             const entry={groupId:g.id,teacherId,type:isMonth?"monthly":"session",chargeOnAbsence,enrolledAt:todayISO()};
             if(isMonth){entry.monthlyPrice=monthPrice;entry.startDate=start}
-            else entry.sessionRate=rate||50;
+            else {entry.sessionRate=rate||50; if(packTotal>0){entry.packageTotal=packTotal;entry.packageSessions=packCnt}}
             enrollments.push(entry);
           }
         }
@@ -1083,13 +1112,26 @@ function openEnroll(studentId){
   openModal("ربط طالب بمجموعة — "+(s?.name||""),`
     <div class="form-group"><label>المجموعة *</label><select id="enGroup"><option value="">—</option>${gOpts}</select></div>
     <div class="form-group"><label>حساب الطالب</label><select id="enType" onchange="onEnType()"><option value="session">بالحصة</option><option value="monthly">بالشهر</option></select></div>
-    <div class="form-group" id="enSBox"><label>سعر الحصة (ج)</label><input type="number" id="enRate" value="50"></div>
+    <div id="enSBox">
+      <div class="form-group"><label>إجمالي مبلغ الباقة (ج)</label><input type="number" id="enPackTotal" value="400" oninput="calcEnRate()"></div>
+      <div class="form-group"><label>عدد حصص الباقة</label><input type="number" id="enPackCnt" min="1" value="8" oninput="calcEnRate()"></div>
+      <div class="form-group"><label>سعر الحصة (تلقائي)</label><input type="number" id="enRate" value="50" readonly style="background:#f0f4f8">
+        <p id="enRateHint" style="font-size:11px;color:var(--muted);margin-top:4px">400 ÷ 8 = 50</p></div>
+    </div>
     <div class="form-group hide" id="enMBox"><label>قيمة الشهر</label><input type="number" id="enMonth" value="200"><label style="margin-top:8px">بداية الاشتراك</label><input type="date" id="enStart" value="${todayISO()}"></div>
     <label class="check-row"><input type="checkbox" id="enAbs"><span>محاسبة الغياب على الطالب</span></label>
   `,`<button class="btn btn-outline btn-sm" onclick="closeModal()">إلغاء</button>
     <button class="btn btn-primary btn-sm" onclick="saveEnroll('${studentId}')">حفظ الربط</button>`);
 }
-function onEnType(){const t=$("enType")?.value;$("enSBox")?.classList.toggle("hide",t==="monthly");$("enMBox")?.classList.toggle("hide",t!=="monthly")}
+function onEnType(){const t=$("enType")?.value;$("enSBox")?.classList.toggle("hide",t==="monthly");$("enMBox")?.classList.toggle("hide",t!=="monthly");if(t!=="monthly")calcEnRate()}
+function calcEnRate(){
+  const total=Number($("enPackTotal")?.value)||0;
+  const cnt=Math.max(1,Number($("enPackCnt")?.value)||1);
+  const rate=Math.round((total/cnt)*100)/100;
+  if($("enRate")) $("enRate").value=rate;
+  if($("enRateHint")) $("enRateHint").textContent=`${total} ÷ ${cnt} = ${rate} ج للحصة`;
+}
+
 async function saveEnroll(studentId){
   const s=cache.students.find(x=>x.id===studentId);
   if(isPaused(s)){toast("الطالب موقوف","err");return}
@@ -1102,7 +1144,13 @@ async function saveEnroll(studentId){
   const type=$("enType").value;
   const entry={groupId,teacherId,type,chargeOnAbsence:!!$("enAbs")?.checked,enrolledAt:todayISO()};
   if(type==="monthly"){entry.monthlyPrice=Number($("enMonth").value)||0;entry.startDate=$("enStart").value||todayISO()}
-  else entry.sessionRate=Number($("enRate").value)||0;
+  else {
+    const packTotal=Number($("enPackTotal")?.value)||0;
+    const packCnt=Math.max(1,Number($("enPackCnt")?.value)||1);
+    entry.packageTotal=packTotal;
+    entry.packageSessions=packCnt;
+    entry.sessionRate=Math.round((packTotal/packCnt)*100)/100 || Number($("enRate")?.value)||0;
+  }
   let ens=[...(s.enrollments||[])];
   const i=ens.findIndex(e=>e.groupId===groupId);
   if(i>=0) ens[i]=entry; else ens.push(entry);
