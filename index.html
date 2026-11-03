@@ -542,44 +542,138 @@ function showNotifPanel(){
     </div>`).join(""));
 }
 
+let homePanel="dues"; // dues | students | teachers | groups | collect
+
+function monthCollectPayments(){
+  const mk=monthKey();
+  return (cache.payments||[]).filter(p=>p.type==="student_payment"&&monthKey(p.payDate||(p.at?new Date(p.at).toISOString().slice(0,10):""))===mk);
+}
+
+function setHomePanel(panel){
+  homePanel=panel;
+  renderPage();
+  setTimeout(()=>{
+    const el=$("homePanelPanel");
+    if(el) el.scrollIntoView({behavior:"smooth",block:"start"});
+  },50);
+}
+
 function renderHome(){
-  const rows=cache.students.filter(s=>!isPaused(s)).map(s=>{
-    const f=studentFinance(s);
-    const lastPay=(cache.payments||[]).filter(p=>p.type==="student_payment"&&p.studentId===s.id).sort((a,b)=>(b.at||0)-(a.at||0))[0];
-    return {s,f,lastPay};
-  }).filter(({f})=>f.unpaid>0).sort((a,b)=>b.f.unpaid-a.f.unpaid||b.f.dueSessions-a.f.dueSessions);
+  const activeStu=cache.students.filter(s=>!isPaused(s));
+  const activeTea=cache.teachers.filter(t=>!isPaused(t));
+  const groups=cache.groups||[];
+  const monthPays=monthCollectPayments();
+  const monthTotal=monthPays.reduce((s,p)=>s+Number(p.amount||0),0);
 
-  const list=rows.map(({s,f,lastPay})=>{
-    const ens=(s.enrollments||[]).map(e=>{
-      const g=cache.groups.find(x=>x.id===e.groupId);
-      const t=cache.teachers.find(x=>x.id===e.teacherId);
-      if(e.type==="monthly") return `<span class="chip">شهري ${money(e.monthlyPrice||0)} · ${sanitize(g?.name||"")} · ${sanitize(t?.name||"")}</span>`;
-      return `<span class="chip">${studentBillableCount(s,e)} حصة × ${money(e.sessionRate||0)}${e.packageSessions?` (باقة ${e.packageSessions})`:""} · ${sanitize(g?.name||"")} · ${sanitize(t?.name||"")}</span>`;
-    }).join(" ")||`<span class="chip yellow">بدون ربط</span>`;
-    let sessHtml="";
-    (s.enrollments||[]).forEach(e=>{
-      const g=cache.groups.find(x=>x.id===e.groupId);
-      const days=studentBillableSessions(s,e);
-      if(!days.length) return;
-      sessHtml+=`<div style="margin-bottom:8px"><b>${sanitize(g?.name||"مجموعة")}</b></div>`;
-      days.forEach((d,i)=>{sessHtml+=`<div class="sess-day">${i+1}) ${sanitize(d.date)}${d.time?" · "+sanitize(d.time):""} · ${d.status==="present"?"حاضر":"غائب (محسوب)"}</div>`});
-    });
-    return `<div class="list-item foldable due" onclick="this.classList.toggle('open')">
-      <div style="flex:1;min-width:160px">
-        <div class="item-title">${sanitize(s.name)} <span class="expand-hint">— اضغط لعرض الحصص</span></div>
-        <div class="item-meta">${ens}<br>مطلوب ${money(f.required)} · مدفوع ${money(f.paid)} · <b style="color:var(--danger)">عليه ${money(f.unpaid)} ج</b>
-        ${lastPay?`<br>آخر استلام: ${sanitize(lastPay.payDate||fmtDate(lastPay.at))}${lastPay.note?" · "+sanitize(lastPay.note):""}`:""}</div>
+  const cards=`<div class="stats-grid" style="margin-bottom:14px">
+    <div class="stat-card success ${homePanel==="students"?"active-filter":""}" style="cursor:pointer" onclick="setHomePanel('students')">
+      <div class="stat-num">${activeStu.length}</div>
+      <div class="stat-label">طلاب نشطون — اضغط</div>
+    </div>
+    <div class="stat-card ${homePanel==="teachers"?"active-filter":""}" style="cursor:pointer" onclick="setHomePanel('teachers')">
+      <div class="stat-num">${activeTea.length}</div>
+      <div class="stat-label">معلمون — اضغط</div>
+    </div>
+    <div class="stat-card ${homePanel==="groups"?"active-filter":""}" style="cursor:pointer" onclick="setHomePanel('groups')">
+      <div class="stat-num">${groups.length}</div>
+      <div class="stat-label">مجموعات — اضغط</div>
+    </div>
+    <div class="stat-card warn ${homePanel==="collect"?"active-filter":""}" style="cursor:pointer" onclick="setHomePanel('collect')">
+      <div class="stat-num">${money(monthTotal)}</div>
+      <div class="stat-label">متحصَّل هذا الشهر — اضغط</div>
+    </div>
+  </div>`;
+
+  let detail="";
+  if(homePanel==="students"){
+    detail=activeStu.map(s=>{
+      const ens=(s.enrollments||[]).map(e=>{
+        const g=cache.groups.find(x=>x.id===e.groupId);
+        return sanitize(g?.name||"");
+      }).filter(Boolean).join("، ")||"بدون مجموعة";
+      return `<div class="list-item ok"><div>
+        <div class="item-title">${sanitize(s.name)}</div>
+        <div class="item-meta">${sanitize(s.phone||"—")} · ${ens}</div>
       </div>
-      <div class="item-actions" onclick="event.stopPropagation()">
-        ${can("collectStudent")?`<button class="btn btn-success btn-sm" onclick="openStudentPay('${s.id}')">استلام المستحقات</button>`:""}
+      ${can("addStudent")?`<button class="btn btn-outline btn-sm" onclick="openStudentForm('${s.id}')">تعديل</button>`:""}
+      </div>`;
+    }).join("")||`<div class="empty-state"><p>لا طلاب نشطين</p></div>`;
+    detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">الطلاب النشطون (${activeStu.length})</div>${detail}</div>`;
+  }else if(homePanel==="teachers"){
+    detail=activeTea.map(t=>`<div class="list-item ok"><div>
+      <div class="item-title">${sanitize(t.name)}</div>
+      <div class="item-meta">${sanitize(t.phone||"—")}</div>
+    </div>
+    ${can("addTeacher")?`<button class="btn btn-outline btn-sm" onclick="openTeacherForm('${t.id}')">تعديل</button>`:""}
+    </div>`).join("")||`<div class="empty-state"><p>لا معلمون</p></div>`;
+    detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">المعلمون (${activeTea.length})</div>${detail}</div>`;
+  }else if(homePanel==="groups"){
+    detail=groups.map(g=>{
+      const te=cache.teachers.find(x=>(g.teacherIds||[]).includes(x.id));
+      const n=cache.students.filter(s=>(s.enrollments||[]).some(e=>e.groupId===g.id)).length;
+      return `<div class="list-item"><div>
+        <div class="item-title">🔗 ${sanitize(g.name)}</div>
+        <div class="item-meta">المعلم: ${sanitize(te?.name||"—")} · طلاب: ${n}</div>
+      </div></div>`;
+    }).join("")||`<div class="empty-state"><p>لا مجموعات</p></div>`;
+    detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">المجموعات (${groups.length})</div>${detail}</div>`;
+  }else if(homePanel==="collect"){
+    const list=monthPays.slice().sort((a,b)=>(b.at||0)-(a.at||0));
+    detail=list.map(p=>`<div class="list-item ok"><div>
+      <div class="item-title">${sanitize(p.studentName||"طالب")}</div>
+      <div class="item-meta">${money(p.amount)} ج · ${sanitize(p.payDate||fmtDate(p.at))}${p.note?" · "+sanitize(p.note):""}</div>
+    </div></div>`).join("")||`<div class="empty-state"><p>لا تحصيل هذا الشهر</p></div>`;
+    detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">متحصَّلات الشهر (${money(monthTotal)} ج)</div>${detail}</div>`;
+  }else{
+    // dues default list
+    const rows=cache.students.filter(s=>!isPaused(s)).map(s=>{
+      const f=studentFinance(s);
+      const lastPay=(cache.payments||[]).filter(p=>p.type==="student_payment"&&p.studentId===s.id).sort((a,b)=>(b.at||0)-(a.at||0))[0];
+      return {s,f,lastPay};
+    }).filter(({f})=>f.unpaid>0).sort((a,b)=>b.f.unpaid-a.f.unpaid||b.f.dueSessions-a.f.dueSessions);
+
+    detail=rows.map(({s,f,lastPay})=>{
+      const ens=(s.enrollments||[]).map(e=>{
+        const g=cache.groups.find(x=>x.id===e.groupId);
+        const te=cache.teachers.find(x=>x.id===e.teacherId);
+        if(e.type==="monthly") return `<span class="chip">شهري ${money(e.monthlyPrice||0)} · ${sanitize(g?.name||"")} · ${sanitize(te?.name||"")}</span>`;
+        return `<span class="chip">${studentBillableCount(s,e)} حصة × ${money(e.sessionRate||0)}${e.packageSessions?` (باقة ${e.packageSessions})`:""} · ${sanitize(g?.name||"")} · ${sanitize(te?.name||"")}</span>`;
+      }).join(" ")||`<span class="chip yellow">بدون ربط</span>`;
+      let sessHtml="";
+      (s.enrollments||[]).forEach(e=>{
+        const g=cache.groups.find(x=>x.id===e.groupId);
+        const days=studentBillableSessions(s,e);
+        if(!days.length) return;
+        sessHtml+=`<div style="margin-bottom:8px"><b>${sanitize(g?.name||"مجموعة")}</b></div>`;
+        days.forEach((d,i)=>{sessHtml+=`<div class="sess-day">${i+1}) ${sanitize(d.date)}${d.time?" · "+sanitize(d.time):""} · ${d.status==="present"?"حاضر":"غائب (محسوب)"}</div>`});
+      });
+      return `<div class="list-item foldable due" onclick="this.classList.toggle('open')">
+        <div style="flex:1;min-width:160px">
+          <div class="item-title">${sanitize(s.name)} <span class="expand-hint">— اضغط لعرض الحصص</span></div>
+          <div class="item-meta">${ens}<br>مطلوب ${money(f.required)} · مدفوع ${money(f.paid)} · <b style="color:var(--danger)">عليه ${money(f.unpaid)} ج</b>
+          ${lastPay?`<br>آخر استلام: ${sanitize(lastPay.payDate||fmtDate(lastPay.at))}${lastPay.note?" · "+sanitize(lastPay.note):""}`:""}</div>
+        </div>
+        <div class="item-actions" onclick="event.stopPropagation()">
+          ${can("collectStudent")?`<button class="btn btn-success btn-sm" onclick="openStudentPay('${s.id}')">استلام المستحقات</button>`:""}
+        </div>
+        <div class="fold-body" onclick="event.stopPropagation()">${sessHtml||`<p style="font-size:12px;color:var(--muted)">لا حصص محتسبة بعد</p>`}</div>
+      </div>`;
+    }).join("")||`<div class="empty-state"><p>لا مستحقات جارية على الطلاب 🎉<br><span style="font-size:12px">المسدَّد في «أرشيف التسويات»</span></p></div>`;
+    detail=`<div id="homeDetailPanel">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+        <div class="card-title" style="margin:0">مستحقات جارية</div>
+        <button class="btn btn-outline btn-sm" onclick="goPage('archive')">📂 الأرشيف</button>
       </div>
-      <div class="fold-body" onclick="event.stopPropagation()">${sessHtml||`<p style="font-size:12px;color:var(--muted)">لا حصص محتسبة بعد</p>`}</div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px">يظهر هنا فقط من عليه مبلغ. اضغط كرت أعلاه لعرض التفاصيل.</p>
+      ${detail}
     </div>`;
-  }).join("")||`<div class="empty-state"><p>لا مستحقات جارية على الطلاب 🎉<br><span style="font-size:12px">المسدَّد في «أرشيف التسويات»</span></p></div>`;
+  }
 
-  return `<div class="page-header"><h2>👨‍🎓 مستحقات الطلاب</h2>
-    <button class="btn btn-outline btn-sm" onclick="goPage('archive')">📂 الأرشيف</button></div>
-  <p style="font-size:12px;color:var(--muted);margin-bottom:10px">يظهر هنا فقط من عليه مبلغ. المسدَّد بالكامل في الأرشيف.</p>${list}`;
+  return `<div class="page-header"><h2>📊 لوحة السنتر</h2>
+    ${homePanel!=="dues"?`<button class="btn btn-outline btn-sm" onclick="setHomePanel('dues')">← المستحقات</button>`:""}
+  </div>
+  ${cards}
+  ${detail}`;
 }
 
 function renderTeacherSettle(){
