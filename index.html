@@ -502,64 +502,152 @@ function countMonths(startStr){
   if(isNaN(start.getTime())) return 1;
   return Math.max(1,(now.getFullYear()-start.getFullYear())*12+(now.getMonth()-start.getMonth())+1);
 }
-function studentRequired(s){
-  let req=0;
-  (s.enrollments||[]).forEach(e=>{
-    if(e.type==="monthly") req+=countMonths(e.startDate||e.enrolledAt)*Number(e.monthlyPrice||0);
-    else req+=studentBillableCount(s,e)*Number(e.sessionRate||0);
-  });
-  return req;
+const AR_MONTHS=["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
+function monthLabel(ym){
+  // ym = YYYY-MM
+  const [y,m]=String(ym).split("-").map(Number);
+  if(!y||!m) return ym;
+  return "تسوية "+AR_MONTHS[m-1]+" "+y;
+}
+function clampPayDay(d){return Math.min(28, Math.max(1, Number(d)||5));}
+/** تاريخ استحقاق تسوية شهر coverageYM حسب مقدم/مؤخر */
+function settlementDueDate(coverageYM, payTiming, payDay){
+  const [y,m]=coverageYM.split("-").map(Number);
+  const pd=clampPayDay(payDay);
+  if((payTiming||"advance")==="advance"){
+    // مقدَّم: يستحق خلال شهر التغطية في يوم الدفع
+    return y+"-"+String(m).padStart(2,"0")+"-"+String(pd).padStart(2,"0");
+  }
+  // مؤخَّر: بعد انتهاء شهر التغطية → يوم الدفع من الشهر التالي
+  let ny=y, nm=m+1;
+  if(nm>12){nm=1;ny++}
+  return ny+"-"+String(nm).padStart(2,"0")+"-"+String(pd).padStart(2,"0");
+}
+function listCoverageMonths(startStr, endStr){
+  // من بداية الاشتراك حتى endStr (YYYY-MM-DD)
+  const out=[];
+  if(!startStr) return out;
+  const s=new Date(startStr);
+  if(isNaN(s.getTime())) return out;
+  let y=s.getFullYear(), m=s.getMonth()+1;
+  const end=endStr?new Date(endStr):new Date();
+  const ey=end.getFullYear(), em=end.getMonth()+1;
+  while(y<ey || (y===ey && m<=em)){
+    out.push(y+"-"+String(m).padStart(2,"0"));
+    m++; if(m>12){m=1;y++}
+    if(out.length>120) break;
+  }
+  return out;
+}
+function studentPaymentsList(s){
+  return (cache.payments||[])
+    .filter(p=>p.type==="student_payment"&&p.studentId===s.id)
+    .slice()
+    .sort((a,b)=>(a.at||0)-(b.at||0));
 }
 function studentPaid(s){
-  return (cache.payments||[]).filter(p=>p.type==="student_payment"&&p.studentId===s.id).reduce((sum,p)=>sum+Number(p.amount||0),0);
+  return studentPaymentsList(s).reduce((sum,p)=>sum+Number(p.amount||0),0);
 }
-/** هل حان موعد إظهار المستحق؟ مقدم=من البداية، مؤخر=بعد يوم الدفع من الشهر */
-function studentIsDueNow(s){
-  const ens=s.enrollments||[];
-  if(!ens.length) return false;
-  const today=new Date();
-  const day=today.getDate();
-  // لو أي تسجيل مؤخر ولم يأتِ يوم الدفع بعد، وباقي الأشهر السابقة محسوبة في المطلوب
-  let any=false;
-  ens.forEach(e=>{
-    any=true;
-    const timing=e.payTiming||"advance"; // advance | defer
-    const payDay=Math.min(28, Math.max(1, Number(e.payDay)||1));
-    if(e.type==="monthly" && timing==="defer" && day<payDay){
-      // هذا الشهر لم يحن بعد — نخصم شهر واحد من "الظهور" فقط إن كان المطلوب من شهر واحد جاري
-      // الظهور: false إذا كل المستحق من الشهر الحالي فقط
+/**
+ * يبني تسويات شهرية باسم «تسوية أكتوبر 2026»
+ * مقدم: تستحق يوم الدفع داخل نفس الشهر
+ * مؤخر: تستحق يوم الدفع من الشهر التالي (بعد انتهاء الشهر)
+ * يوم الدفع 1–28 (فبراير آمن)
+ */
+function buildStudentSettlements(s){
+  const pays=studentPaymentsList(s);
+  // مدفوعات مربوطة بتسوية معيّنة
+  const allocated=new Map(); // key -> amount
+  const unassigned=[];
+  pays.forEach(p=>{
+    const amt=Number(p.amount||0);
+    if(p.settlementKey){
+      allocated.set(p.settlementKey,(allocated.get(p.settlementKey)||0)+amt);
+    }else if(p.settlementYm){
+      // توافق قديم: حسب الشهر
+      const k="ym:"+p.settlementYm;
+      allocated.set(k,(allocated.get(k)||0)+amt);
+    }else{
+      unassigned.push(amt);
     }
   });
-  const f={required:studentRequired(s),paid:studentPaid(s)};
-  const unpaid=Math.max(0,f.required-f.paid);
-  if(unpaid<=0) return false;
-  // تحقق: لو كل الاشتراكات مؤخرة ولم يأتِ يوم الدفع، أخفِ إن كان المدفوع يغطي كل الأشهر ما عدا الحالي
-  let hide=true;
-  ens.forEach(e=>{
-    const timing=e.payTiming||"advance";
-    const payDay=Math.min(28, Math.max(1, Number(e.payDay)||1));
-    if(e.type!=="monthly"){ hide=false; return; }
-    if(timing==="advance"){ hide=false; return; }
-    if(day>=payDay){ hide=false; return; }
-    // مؤخر ولم يأتِ اليوم: لو عليه أكثر من شهر واحد يظهر
-    const months=countMonths(e.startDate||e.enrolledAt);
-    if(months>1) hide=false;
+  let pool=unassigned.reduce((a,b)=>a+b,0);
+  const settlements=[];
+  const today=todayISO();
+
+  (s.enrollments||[]).forEach(e=>{
+    if(e.type==="monthly"){
+      const price=Number(e.monthlyPrice||0);
+      const timing=e.payTiming||"advance";
+      const payDay=clampPayDay(e.payDay);
+      const months=listCoverageMonths(e.startDate||e.enrolledAt, todayISO());
+      months.forEach(ym=>{
+        const due=settlementDueDate(ym, timing, payDay);
+        const isDue=due<=today;
+        const key=s.id+"_"+e.groupId+"_"+ym;
+        // اسم التسوية = شهر الظهور (شهر تاريخ الاستحقاق) عند المقدَّم = نفس شهر التغطية
+        // عند المؤخَّر الاستحقاق في الشهر التالي لكن الاسم يبقى شهر التغطية (أكتوبر)
+        const label=monthLabel(ym)+(timing==="defer"?" (مؤخَّر)":" (مقدَّم)");
+        let paid=allocated.get(key)||0;
+        // مدفوعات قديمة حسب ym فقط
+        const ymExtra=allocated.get("ym:"+ym)||0;
+        if(ymExtra>0){
+          const use=Math.min(ymExtra, Math.max(0,price-paid));
+          paid+=use;
+          allocated.set("ym:"+ym, ymExtra-use);
+        }
+        // الباقي غير المعيّن يُترك للأدمن — لا يُخصم تلقائياً من تسوية أخرى
+        // لكن إن بقي pool يمكن عرضه كرصيد عام
+        const remaining=Math.max(0, price-paid);
+        settlements.push({
+          key, groupId:e.groupId, ym, label, timing, payDay, dueDate:due,
+          amount:price, paid, remaining, isDue,
+          open:remaining>0 && isDue,
+          type:"monthly"
+        });
+      });
+    }else{
+      const n=studentBillableCount(s,e);
+      const rate=Number(e.sessionRate||0);
+      const amount=n*rate;
+      if(amount<=0 && n===0) return;
+      const g=cache.groups.find(x=>x.id===e.groupId);
+      const key=s.id+"_"+e.groupId+"_sessions";
+      let paid=allocated.get(key)||0;
+      const remaining=Math.max(0, amount-paid);
+      settlements.push({
+        key, groupId:e.groupId, ym:null,
+        label:"حصص "+(g?.name||""),
+        timing:e.payTiming||"advance", payDay:clampPayDay(e.payDay),
+        dueDate:todayISO(), amount, paid, remaining,
+        isDue:remaining>0, open:remaining>0,
+        type:"session", sessions:n, rate
+      });
+    }
   });
-  return !hide;
+  // رصيد غير موزع (مدفوعات قديمة بدون ربط)
+  const unassignedLeft=pool;
+  return {settlements, unassignedPaid:unassignedLeft};
+}
+function studentRequired(s){
+  return buildStudentSettlements(s).settlements.reduce((sum,x)=>sum+x.amount,0);
 }
 function studentFinance(s){
-  const required=studentRequired(s),paid=studentPaid(s);
+  const built=buildStudentSettlements(s);
+  const settlements=built.settlements;
+  const required=settlements.reduce((sum,x)=>sum+x.amount,0);
+  const paid=studentPaid(s);
+  const unpaid=settlements.reduce((sum,x)=>sum+x.remaining,0);
+  const openSettlements=settlements.filter(x=>x.open);
+  const showDue=openSettlements.length>0;
   let dueSessions=0;
   (s.enrollments||[]).forEach(e=>{if(e.type!=="monthly") dueSessions+=studentBillableCount(s,e)});
-  const unpaid=Math.max(0,required-paid);
-  const showDue=unpaid>0 && studentIsDueNow(s);
-  // متوقع هذا الشهر من هذا الطالب
   let expectedThisMonth=0;
   (s.enrollments||[]).forEach(e=>{
     if(e.type==="monthly") expectedThisMonth+=Number(e.monthlyPrice||0);
-    else expectedThisMonth+=Number(e.sessionRate||0); // تقديري حصة — أو الباقة موزعة
+    else expectedThisMonth+=Number(e.sessionRate||0);
   });
-  return {required,paid,unpaid,dueSessions,showDue,expectedThisMonth};
+  return {required,paid,unpaid,dueSessions,showDue,expectedThisMonth,settlements,openSettlements,unassignedPaid:built.unassignedPaid||0};
 }
 
 
@@ -714,13 +802,19 @@ function renderHome(){
       return `<div class="list-item foldable due" onclick="this.classList.toggle('open')">
         <div style="flex:1;min-width:160px">
           <div class="item-title">${sanitize(s.name)} <span class="expand-hint">— اضغط لعرض الحصص</span></div>
-          <div class="item-meta">${ens}<br>مطلوب ${money(f.required)} · مدفوع ${money(f.paid)} · <b style="color:var(--danger)">عليه ${money(f.unpaid)} ج</b>
+          <div class="item-meta">${ens}<br>
+          ${(f.openSettlements||[]).map(x=>`<span class="chip red">${sanitize(x.label)}${x.timing==="defer"?" · مؤخَّر":" · مقدَّم"} · باقي ${money(x.remaining)}</span>`).join(" ")}
+          <br>مطلوب ${money(f.required)} · مدفوع ${money(f.paid)} · <b style="color:var(--danger)">عليه ${money(f.unpaid)} ج</b>
           ${lastPay?`<br>آخر استلام: ${sanitize(lastPay.payDate||fmtDate(lastPay.at))}${lastPay.note?" · "+sanitize(lastPay.note):""}`:""}</div>
         </div>
         <div class="item-actions" onclick="event.stopPropagation()">
           ${can("collectStudent")?`<button class="btn btn-success btn-sm" onclick="openStudentPay('${s.id}')">استلام المستحقات</button>`:""}
         </div>
-        <div class="fold-body" onclick="event.stopPropagation()">${sessHtml||`<p style="font-size:12px;color:var(--muted)">لا حصص محتسبة بعد</p>`}</div>
+        <div class="fold-body" onclick="event.stopPropagation()">
+          <div style="margin-bottom:8px"><b>التسويات</b></div>
+          ${(f.settlements||[]).map(x=>`<div class="sess-day" style="${x.open?'color:var(--danger);font-weight:bold':''}">${sanitize(x.label)} · ${money(x.amount)} · مدفوع ${money(x.paid)} · باقي ${money(x.remaining)} · استحقاق ${sanitize(x.dueDate)}${x.open?' 🔴':(x.remaining<=0?' ✅':'')}</div>`).join("")||`<p style="font-size:12px;color:var(--muted)">لا تسويات</p>`}
+          ${sessHtml?`<div style="margin-top:10px"><b>الحصص</b></div>${sessHtml}`:""}
+        </div>
       </div>`;
     }).join("")||`<div class="empty-state"><p>لا مستحقات جارية على الطلاب 🎉<br><span style="font-size:12px">المسدَّد في «أرشيف التسويات»</span></p></div>`;
     detail=`<div id="homeDetailPanel">
@@ -1097,13 +1191,13 @@ function openStudentForm(id){
         <input type="date" id="sStart" value="${sanitize(en?.startDate||todayISO())}"></div>
       <div class="form-group"><label>الدفع</label>
         <select id="sPayTiming">
-          <option value="advance" ${(en?.payTiming||"advance")==="advance"?"selected":""}>مقدَّم (من بداية المدة)</option>
-          <option value="defer" ${en?.payTiming==="defer"?"selected":""}>مؤخَّر (بعد يوم معيّن من الشهر)</option>
+          <option value="advance" ${(en?.payTiming||"advance")==="advance"?"selected":""}>مقدَّم — تسوية الشهر في يوم الدفع خلال نفس الشهر</option>
+          <option value="defer" ${(en?.payTiming||"defer")==="defer"?"selected":""}>مؤخَّر — تسوية الشهر بعد انتهائه (يوم الدفع من الشهر التالي)</option>
         </select>
       </div>
       <div class="form-group"><label>يوم الدفع من الشهر (1–28)</label>
         <input type="number" id="sPayDay" min="1" max="28" value="${en?.payDay??5}">
-        <p style="font-size:11px;color:var(--muted);margin-top:4px">مثال 8: يظهر مستحقاً من يوم 8 فقط (إن كان مؤخراً)</p>
+        <p style="font-size:11px;color:var(--muted);margin-top:4px">1–28 فقط (مناسب لفبراير). مؤخَّر: تسوية أكتوبر تظهر يوم الدفع من نوفمبر.</p>
       </div>
       <div class="form-group" style="grid-column:1/-1">
         <label class="check-row"><input type="checkbox" id="sAbs" ${en?.chargeOnAbsence?"checked":""}><span>محاسبة الغياب على الطالب</span></label>
@@ -1302,7 +1396,7 @@ function openEnroll(studentId){
       </select>
     </div>
     <div class="form-group"><label>الدفع</label>
-      <select id="enPayTiming"><option value="advance">مقدَّم</option><option value="defer" selected>مؤخَّر</option></select>
+      <select id="enPayTiming"><option value="advance">مقدَّم (خلال الشهر)</option><option value="defer" selected>مؤخَّر (بعد انتهاء الشهر)</option></select>
     </div>
     <div class="form-group"><label>يوم الدفع (1–28)</label><input type="number" id="enPayDay" min="1" max="28" value="5"></div>
     <div id="enSBox" class="hide">
@@ -1354,27 +1448,61 @@ async function saveEnroll(studentId){
 
 function openStudentPay(studentId){
   if(!requirePerm("collectStudent")) return;
-  const opts=cache.students.map(s=>`<option value="${s.id}" ${s.id===studentId?"selected":""}>${sanitize(s.name)}</option>`).join("");
   const s=cache.students.find(x=>x.id===studentId);
-  const f=s?studentFinance(s):{unpaid:0};
-  openModal("استلام مستحقات طالب",`
-    <div class="form-group"><label>الطالب</label><select id="spSt">${opts}</select></div>
-    <div class="form-group"><label>المبلغ</label><input type="number" id="spAmt" value="${f.unpaid||0}"></div>
+  const f=studentFinance(s);
+  const open=f.openSettlements||[];
+  const allOpen=f.settlements.filter(x=>x.remaining>0);
+  if(!open.length && !allOpen.length){toast("لا متبقي","err");return}
+  const opts=(open.length?open:allOpen).map(x=>`
+    <option value="${sanitize(x.key)}" data-remain="${x.remaining}" data-ym="${x.ym||""}" data-label="${sanitize(x.label)}">
+      ${sanitize(x.label)} — باقي ${x.remaining} ج — استحقاق ${x.dueDate}
+    </option>`).join("");
+  const others=allOpen.filter(x=>!x.open && x.remaining>0);
+  openModal("استلام مستحقات — "+(s?.name||""),`
+    <p style="font-size:13px;margin-bottom:8px">اختر <b>التسوية</b> التي تستلم عليها الآن. باقي التسويات تظل مستحقة.</p>
+    <div class="form-group"><label>التسوية *</label>
+      <select id="spSettle" onchange="onSpSettle()">${opts}</select>
+    </div>
+    <div id="spOther" style="margin-bottom:10px">${
+      (f.openSettlements||[]).length>1
+        ? `<p style="font-size:12px;color:var(--danger)">تسويات أخرى مفتوحة بالأحمر: ${(f.openSettlements||[]).map(x=>x.label+" ("+x.remaining+" ج)").join(" · ")}</p>`
+        : ""
+    }</div>
+    <div class="form-group"><label>المبلغ</label><input type="number" id="spAmt" value=""></div>
     <div class="form-group"><label>تاريخ الاستلام</label><input type="date" id="spDate" value="${todayISO()}"></div>
-    <div class="form-group"><label>ملاحظة</label><input id="spNote"></div>
+    <div class="form-group"><label>ملاحظة</label><input id="spNote" placeholder="اختياري"></div>
   `,`<button class="btn btn-outline btn-sm" onclick="closeModal()">إلغاء</button>
-    <button class="btn btn-success btn-sm" onclick="saveStudentPay()">حفظ الاستلام</button>`);
+    <button class="btn btn-success btn-sm" onclick="saveStudentPay('${studentId}')">تأكيد الاستلام</button>`);
+  onSpSettle();
 }
-async function saveStudentPay(){
-  if(!requirePerm("collectStudent")) return;
-  const studentId=$("spSt").value,amount=Number($("spAmt").value)||0;
-  if(!studentId||amount<=0){toast("أكمل البيانات","err");return}
+function onSpSettle(){
+  const sel=$("spSettle");
+  if(!sel) return;
+  const opt=sel.options[sel.selectedIndex];
+  const rem=Number(opt?.dataset?.remain)||0;
+  if($("spAmt")) $("spAmt").value=rem;
+}
+async function saveStudentPay(studentId){
   const s=cache.students.find(x=>x.id===studentId);
+  const amount=Number($("spAmt").value)||0;
+  if(amount<=0){toast("أدخل مبلغاً","err");return}
+  const sel=$("spSettle");
+  const opt=sel?.options[sel.selectedIndex];
+  const settlementKey=sel?.value||"";
+  const settlementYm=opt?.dataset?.ym||"";
+  const settlementLabel=opt?.dataset?.label||opt?.text||"";
+  if(!settlementKey){toast("اختر التسوية","err");return}
   try{
-    await db.collection("center_payments").add({type:"student_payment",studentId,studentName:s?.name||"",amount,payDate:$("spDate").value||todayISO(),note:$("spNote").value.trim(),at:Date.now(),by:currentUser.uid});
-    closeModal();toast("تم","ok");
+    await db.collection("center_payments").add({
+      type:"student_payment", studentId, studentName:s?.name||"",
+      amount, payDate:$("spDate").value||todayISO(), note:($("spNote").value||"").trim(),
+      settlementKey, settlementYm, settlementLabel,
+      at:Date.now(), by:currentUser.uid
+    });
+    closeModal();toast("تم الاستلام على: "+settlementLabel,"ok");
   }catch(e){toast(e.message,"err")}
 }
+
 
 function editPayment(payId){
   const p=(cache.payments||[]).find(x=>x.id===payId);
