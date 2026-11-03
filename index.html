@@ -899,6 +899,9 @@ function openStudentForm(id){
     return `<option value="${g.id}" ${sel}>${sanitize(g.name)} — ${sanitize(t?.name||"")}</option>`;
   }).filter(Boolean).join("");
   const type=en?.type||"session";
+  const defPackCnt=Number(en?.packageSessions)||8;
+  const defPackTotal=(en?.packageTotal!=null && en?.packageTotal!=="") ? Number(en.packageTotal) : ((Number(en?.sessionRate)||0)*defPackCnt || 400);
+  const defRate=Number(en?.sessionRate)||Math.round((defPackTotal/defPackCnt)*100)/100||50;
   openModal(s?"تعديل طالب":"طالب جديد",`
     <div class="form-grid two">
       <div class="form-group"><label>اسم الطالب *</label><input id="sName" value="${sanitize(s?.name||"")}"></div>
@@ -914,11 +917,11 @@ function openStudentForm(id){
         </select>
       </div>
       <div class="form-group" id="sPackTotalBox"><label>إجمالي مبلغ الباقة (ج)</label>
-        <input type="number" id="sPackTotal" min="0" value="${en?.packageTotal ?? ((en?.sessionRate||0)*(en?.packageSessions||0)) || 400}" oninput="calcStudentSessionRate()"></div>
+        <input type="number" id="sPackTotal" min="0" value="${defPackTotal}" oninput="calcStudentSessionRate()"></div>
       <div class="form-group" id="sPackCntBox"><label>عدد حصص الباقة</label>
-        <input type="number" id="sPackCnt" min="1" value="${en?.packageSessions ?? 8}" oninput="calcStudentSessionRate()"></div>
+        <input type="number" id="sPackCnt" min="1" value="${defPackCnt}" oninput="calcStudentSessionRate()"></div>
       <div class="form-group" id="sRateBox"><label>سعر الحصة (محسوب تلقائياً)</label>
-        <input type="number" id="sRate" min="0" value="${en?.sessionRate??50}" readonly style="background:#f0f4f8">
+        <input type="number" id="sRate" min="0" value="${defRate}" readonly style="background:#f0f4f8">
         <p id="sRateHint" style="font-size:11px;color:var(--muted);margin-top:4px">الإجمالي ÷ عدد الحصص</p></div>
       <div class="form-group hide" id="sMonthBox"><label>قيمة الشهر (ج)</label>
         <input type="number" id="sMonth" min="0" value="${en?.monthlyPrice??200}"></div>
