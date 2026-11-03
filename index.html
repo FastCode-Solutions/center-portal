@@ -112,6 +112,13 @@ button,input,select,textarea{font-family:inherit;font-size:14px}
 .list-item.foldable{cursor:pointer}
 .list-item .fold-body{display:none;margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);width:100%}
 .list-item.open .fold-body{display:block}
+.pull-hint{text-align:center;font-size:12px;color:var(--muted);padding:6px 0;opacity:0;transition:opacity .2s}
+.pull-hint.show{opacity:1}
+.filter-tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.filter-tabs .stat-card{cursor:pointer;flex:1;min-width:90px;transition:box-shadow .15s}
+.filter-tabs .stat-card.active-filter{box-shadow:0 0 0 2px var(--primary);background:var(--primary-light)}
+.session-search-item{padding:10px;border:1px solid var(--border);border-radius:10px;margin-bottom:6px;cursor:pointer;background:#fff}
+.session-search-item:hover{background:var(--primary-light)}
 </style>
 </head>
 <body>
@@ -361,6 +368,47 @@ async function loadAll(){
   cache.sessions.sort((a,b)=>(a.date||"").localeCompare(b.date||"")||(a.createdAt||0)-(b.createdAt||0));
   cache.payments.sort((a,b)=>(b.at||0)-(a.at||0));
 }
+/* سحب للتحديث + فلاتر القوائم */
+let listFilter={students:"all",teachers:"all",groups:"all"};
+let pullStartY=0,pulling=false;
+function setupPullRefresh(){
+  const main=$("mainContent");
+  if(!main||main.dataset.pullBound) return;
+  main.dataset.pullBound="1";
+  let hint=document.getElementById("pullHint");
+  if(!hint){
+    hint=document.createElement("div");
+    hint.id="pullHint";
+    hint.className="pull-hint";
+    hint.textContent="↓ اسحب للتحديث";
+    main.parentNode.insertBefore(hint,main);
+  }
+  main.addEventListener("touchstart",e=>{
+    if(window.scrollY<=0){pullStartY=e.touches[0].clientY;pulling=true}
+  },{passive:true});
+  main.addEventListener("touchmove",e=>{
+    if(!pulling) return;
+    const dy=e.touches[0].clientY-pullStartY;
+    if(dy>60) hint.classList.add("show");
+  },{passive:true});
+  main.addEventListener("touchend",async e=>{
+    if(!pulling) return;
+    pulling=false;
+    const dy=(e.changedTouches[0].clientY-pullStartY);
+    hint.classList.remove("show");
+    if(dy>80 && window.scrollY<=2){
+      hint.textContent="جاري التحديث...";hint.classList.add("show");
+      try{await loadAll();renderPage();toast("تم التحديث","ok")}
+      catch(err){toast("تعذر التحديث","err")}
+      hint.classList.remove("show");hint.textContent="↓ اسحب للتحديث";
+    }
+  },{passive:true});
+}
+function setListFilter(page,val){
+  listFilter[page]=val;
+  renderPage();
+}
+
 function listenRealtime(){
   unsubscribers.forEach(u=>{try{u()}catch(e){}});
   unsubscribers=[];
@@ -476,6 +524,7 @@ function renderPage(){
   const map={home:renderHome,teacherSettle:renderTeacherSettle,archive:renderArchive,sessions:renderSessions,schedule:renderSchedule,groups:renderGroups,teachers:renderTeachers,students:renderStudentsManage,staff:renderStaff,reports:renderReports};
   $("mainContent").innerHTML=(map[currentPage]||renderHome)();
   updateNotifBadge();
+  setupPullRefresh();
 }
 function updateNotifBadge(){
   const n=getPauseNotifications().length,b=$("notifBadge");
@@ -665,20 +714,33 @@ async function closeCycle(teacherId,groupId,cycleIndex){
 }
 
 function renderGroups(){
-  const list=cache.groups.map(g=>{
-    const t=cache.teachers.find(x=>(g.teacherIds||[])[0]===x.id||(g.teacherIds||[]).includes(x.id));
+  const f=listFilter.groups||"all";
+  let items=cache.groups.slice();
+  // groups don't have paused - count by active teachers link; use all / empty students
+  const withStu=items.filter(g=>cache.students.some(s=>(s.enrollments||[]).some(e=>e.groupId===g.id)));
+  const empty=items.filter(g=>!cache.students.some(s=>(s.enrollments||[]).some(e=>e.groupId===g.id)));
+  if(f==="with") items=withStu;
+  else if(f==="empty") items=empty;
+  const list=items.map(g=>{
+    const te=cache.teachers.find(x=>(g.teacherIds||[])[0]===x.id||(g.teacherIds||[]).includes(x.id));
     const sts=cache.students.filter(s=>(s.enrollments||[]).some(e=>e.groupId===g.id));
     return `<div class="list-item"><div>
       <div class="item-title">🔗 ${sanitize(g.name)}</div>
-      <div class="item-meta">المعلم: ${sanitize(t?.name||"—")}<br>الطلاب: ${sts.map(s=>s.name).join("، ")||"—"}</div></div>
+      <div class="item-meta">المعلم: ${sanitize(te?.name||"—")}<br>الطلاب: ${sts.map(s=>s.name).join("، ")||"—"}</div></div>
       <div class="item-actions">
         ${can("manageGroups")?`<button class="btn btn-outline btn-sm" onclick="openGroupForm('${g.id}')">تعديل</button>`:""}
         ${can("deleteData")?`<button class="btn btn-danger btn-sm" onclick="deleteGroup('${g.id}')">حذف</button>`:""}
       </div></div>`;
-  }).join("")||`<div class="empty-state"><p>أنشئ مجموعة = معلم + طلاب</p></div>`;
+  }).join("")||`<div class="empty-state"><p>لا نتائج لهذا الفلتر</p></div>`;
   return `<div class="page-header"><h2>🔗 المجموعات (الربط)</h2>
     ${can("manageGroups")?`<button class="btn btn-primary btn-sm" onclick="openGroupForm()">+ مجموعة</button>`:""}</div>
-  <p style="font-size:12px;color:var(--muted);margin-bottom:10px">المجموعة = معلم مرتبط بطلاب.</p>${list}`;
+  <div class="filter-tabs">
+    <div class="stat-card ${f==="all"?"active-filter":""}" onclick="setListFilter('groups','all')"><div class="stat-num">${cache.groups.length}</div><div class="stat-label">الكل</div></div>
+    <div class="stat-card success ${f==="with"?"active-filter":""}" onclick="setListFilter('groups','with')"><div class="stat-num">${withStu.length}</div><div class="stat-label">بها طلاب</div></div>
+    <div class="stat-card warn ${f==="empty"?"active-filter":""}" onclick="setListFilter('groups','empty')"><div class="stat-num">${empty.length}</div><div class="stat-label">بدون طلاب</div></div>
+  </div>
+  <p style="font-size:12px;color:var(--muted);margin-bottom:10px">اسحب الشاشة للأسفل للتحديث · اضغط الكرت للتصفية</p>
+  ${list}`;
 }
 function openGroupForm(id){
   if(!requirePerm("manageGroups")) return;
@@ -712,19 +774,32 @@ async function deleteGroup(id){
 }
 
 function renderTeachers(){
-  const list=cache.teachers.map(t=>{
-    const cycle=(t.billingCycle==="monthly")?`شهري ${money(t.monthlySalary||0)} ج`:`كل ${t.sessionsPerCycle||8} حصص`;
-    const pay=(t.payMode==="per_student")?`${money(t.ratePerStudent||0)}/طالب`:`${money(t.ratePerSession||0)}/جلسة`;
-    return `<div class="list-item ${isPaused(t)?"closed":""}"><div>
-      <div class="item-title">${sanitize(t.name)} ${isPaused(t)?'<span class="chip red">موقوف</span>':""}</div>
-      <div class="item-meta">${sanitize(t.phone||"")} · ${cycle} · ${pay}${isPaused(t)&&t.pauseRemindAt?`<br>تذكير: ${sanitize(t.pauseRemindAt)}`:""}</div></div>
+  const f=listFilter.teachers||"all";
+  const active=cache.teachers.filter(x=>!isPaused(x));
+  const paused=cache.teachers.filter(x=>isPaused(x));
+  let items=cache.teachers.slice();
+  if(f==="active") items=active;
+  else if(f==="paused") items=paused;
+  const list=items.map(te=>{
+    const cycle=(te.billingCycle==="monthly")?`شهري ${money(te.monthlySalary||0)} ج`:`كل ${te.sessionsPerCycle||8} حصص`;
+    const pay=(te.payMode==="per_student")?`${money(te.ratePerStudent||0)}/طالب`:`${money(te.ratePerSession||0)}/جلسة`;
+    return `<div class="list-item ${isPaused(te)?"closed":""}"><div>
+      <div class="item-title">${sanitize(te.name)} ${isPaused(te)?'<span class="chip red">موقوف</span>':""}</div>
+      <div class="item-meta">${sanitize(te.phone||"")} · ${cycle} · ${pay}${isPaused(te)&&te.pauseRemindAt?`<br>تذكير: ${sanitize(te.pauseRemindAt)}`:""}</div></div>
       <div class="item-actions">
-        ${can("addTeacher")?`<button class="btn btn-outline btn-sm" onclick="openTeacherForm('${t.id}')">تعديل</button>`:""}
-        ${can("addTeacher")?`<button class="btn ${isPaused(t)?"btn-success":"btn-danger"} btn-sm" onclick="togglePause('teacher','${t.id}')">${isPaused(t)?"تفعيل":"إيقاف"}</button>`:""}
+        ${can("addTeacher")?`<button class="btn btn-outline btn-sm" onclick="openTeacherForm('${te.id}')">تعديل</button>`:""}
+        ${can("addTeacher")?`<button class="btn ${isPaused(te)?"btn-success":"btn-danger"} btn-sm" onclick="togglePause('teacher','${te.id}')">${isPaused(te)?"تفعيل":"إيقاف"}</button>`:""}
       </div></div>`;
-  }).join("")||`<div class="empty-state"><p>لا معلمون</p></div>`;
+  }).join("")||`<div class="empty-state"><p>لا نتائج لهذا الفلتر</p></div>`;
   return `<div class="page-header"><h2>👨‍🏫 المعلمون</h2>
-    ${can("addTeacher")?`<button class="btn btn-primary btn-sm" onclick="openTeacherForm()">+ معلم</button>`:""}</div>${list}`;
+    ${can("addTeacher")?`<button class="btn btn-primary btn-sm" onclick="openTeacherForm()">+ معلم</button>`:""}</div>
+  <div class="filter-tabs">
+    <div class="stat-card ${f==="all"?"active-filter":""}" onclick="setListFilter('teachers','all')"><div class="stat-num">${cache.teachers.length}</div><div class="stat-label">الكل</div></div>
+    <div class="stat-card success ${f==="active"?"active-filter":""}" onclick="setListFilter('teachers','active')"><div class="stat-num">${active.length}</div><div class="stat-label">مفعّل</div></div>
+    <div class="stat-card danger ${f==="paused"?"active-filter":""}" onclick="setListFilter('teachers','paused')"><div class="stat-num">${paused.length}</div><div class="stat-label">متوقف</div></div>
+  </div>
+  <p style="font-size:12px;color:var(--muted);margin-bottom:10px">اسحب للأسفل للتحديث · اضغط الكرت لعرض الفئة فقط</p>
+  ${list}`;
 }
 function openTeacherForm(id){
   if(!requirePerm("addTeacher")) return;
@@ -772,7 +847,13 @@ async function saveTeacher(id){
 }
 
 function renderStudentsManage(){
-  const list=cache.students.map(s=>{
+  const f=listFilter.students||"all";
+  const active=cache.students.filter(x=>!isPaused(x));
+  const paused=cache.students.filter(x=>isPaused(x));
+  let source=cache.students;
+  if(f==="active") source=active;
+  else if(f==="paused") source=paused;
+  const list=source.map(s=>{
     const ens=(s.enrollments||[]).map(e=>{
       const g=cache.groups.find(x=>x.id===e.groupId);
       if(e.type==="monthly") return `<span class="chip">شهري ${money(e.monthlyPrice||0)} · ${sanitize(g?.name||"")}</span>`;
@@ -790,7 +871,7 @@ function renderStudentsManage(){
         ${can("addStudent")?`<button class="btn ${isPaused(s)?"btn-success":"btn-danger"} btn-sm" onclick="togglePause('student','${s.id}')">${isPaused(s)?"تفعيل":"إيقاف"}</button>`:""}
       </div>
     </div>`;
-  }).join("")||`<div class="empty-state"><p>لا طلاب</p></div>`;
+  }).join("")||`<div class="empty-state"><p>لا نتائج لهذا الفلتر</p></div>`;
   return `<div class="page-header"><h2>إضافة / تعديل طالب</h2>
     <div style="display:flex;flex-wrap:wrap;gap:6px">
       ${can("addStudent")?`<button class="btn btn-primary btn-sm" onclick="openStudentForm()">+ طالب</button>`:""}
@@ -799,7 +880,12 @@ function renderStudentsManage(){
       <input type="file" id="stuImportFile" accept=".xlsx,.xls,.csv" class="hide" onchange="importStudentsExcel(event)">
     </div>
   </div>
-  <p style="font-size:12px;color:var(--muted);margin-bottom:10px">عند الإضافة حدّد المجموعة وطريقة الحساب (حصة/شهر) والمبلغ. زر الإيقاف بجانب كل طالب.</p>
+  <div class="filter-tabs">
+    <div class="stat-card ${f==="all"?"active-filter":""}" onclick="setListFilter('students','all')"><div class="stat-num">${cache.students.length}</div><div class="stat-label">الكل</div></div>
+    <div class="stat-card success ${f==="active"?"active-filter":""}" onclick="setListFilter('students','active')"><div class="stat-num">${active.length}</div><div class="stat-label">مفعّل</div></div>
+    <div class="stat-card danger ${f==="paused"?"active-filter":""}" onclick="setListFilter('students','paused')"><div class="stat-num">${paused.length}</div><div class="stat-label">متوقف</div></div>
+  </div>
+  <p style="font-size:12px;color:var(--muted);margin-bottom:10px">اسحب للأسفل للتحديث · اضغط الكرت لعرض الفئة فقط</p>
   ${list}`;
 }
 function openStudentForm(id){
@@ -1051,29 +1137,80 @@ async function saveStudentPay(){
 function renderSessions(){
   const list=[...cache.sessions].reverse().slice(0,40).map(s=>{
     const g=cache.groups.find(x=>x.id===s.groupId);
-    const t=cache.teachers.find(x=>x.id===s.teacherId);
-    const p=(s.attendance||[]).filter(a=>a.status==="present").length;
-    const a=(s.attendance||[]).filter(a=>a.status==="absent").length;
-    return `<div class="list-item"><div><div class="item-title">${sanitize(s.date)} — ${sanitize(g?.name||"")}</div>
-      <div class="item-meta">المعلم: ${sanitize(t?.name||"")} · حاضر ${p} · غائب ${a}</div></div></div>`;
+    const te=cache.teachers.find(x=>x.id===s.teacherId);
+    const pr=(s.attendance||[]).filter(a=>a.status==="present").length;
+    const ab=(s.attendance||[]).filter(a=>a.status==="absent").length;
+    return `<div class="list-item"><div>
+      <div class="item-title">${sanitize(s.date)}${s.time?" · "+sanitize(s.time):""} — ${sanitize(g?.name||"")}</div>
+      <div class="item-meta">المعلم: ${sanitize(te?.name||"")} · حاضر ${pr} · غائب ${ab}</div>
+    </div></div>`;
   }).join("")||`<div class="empty-state"><p>لا جلسات</p></div>`;
   return `<div class="page-header"><h2>✅ تسجيل جلسة</h2>
-    ${can("registerSession")?`<button class="btn btn-primary btn-sm" onclick="openSessionForm()">+ جلسة اليوم</button>`:""}</div>
-  <p style="font-size:12px;color:var(--muted);margin-bottom:10px">كل جلسة = حصة للمعلم + حصة للطلاب الحاضرين.</p>${list}`;
+    ${can("registerSession")?`<button class="btn btn-primary btn-sm" onclick="openSessionForm()">+ جلسة</button>`:""}</div>
+  <p style="font-size:12px;color:var(--muted);margin-bottom:10px">ابحث باسم مجموعة أو معلم أو طالب · التاريخ + الوقت · تواريخ سابقة مسموحة</p>
+  ${list}`;
 }
-function openSessionForm(){
+function openSessionForm(preGroupId){
   if(!requirePerm("registerSession")) return;
-  const gOpts=cache.groups.map(g=>{
-    const t=cache.teachers.find(x=>(g.teacherIds||[]).includes(x.id));
-    return `<option value="${g.id}">${sanitize(g.name)} — ${sanitize(t?.name||"")}</option>`;
-  }).join("");
   openModal("تسجيل جلسة",`
-    <div class="form-group"><label>المجموعة *</label><select id="seG" onchange="onSeG()"><option value="">—</option>${gOpts}</select></div>
-    <div class="form-group"><label>تاريخ الجلسة (يمكن تاريخ سابق)</label><input type="date" id="seD" value="${todayISO()}"></div>
-    <p style="font-size:11px;color:var(--muted);margin:-6px 0 10px">لتسجيل شغل قديم: اختر تاريخ الشهر أو اليوم السابق ثم احفظ.</p>
-    <div id="seAtt"><p style="font-size:12px;color:var(--muted)">اختر المجموعة</p></div>
+    <div class="form-group"><label>بحث (مجموعة / معلم / طالب)</label>
+      <input id="seSearch" placeholder="اكتب للبحث..." oninput="onSessionSearch()"></div>
+    <div id="seSearchResults" style="max-height:140px;overflow-y:auto;margin-bottom:8px"></div>
+    <div class="form-group"><label>المجموعة *</label>
+      <select id="seG" onchange="onSeG()"><option value="">— اختر أو ابحث أعلاه —</option>
+        ${cache.groups.map(g=>{
+          const te=cache.teachers.find(x=>(g.teacherIds||[]).includes(x.id));
+          return `<option value="${g.id}" ${preGroupId===g.id?"selected":""}>${sanitize(g.name)} — ${sanitize(te?.name||"")}</option>`;
+        }).join("")}
+      </select>
+    </div>
+    <div class="form-grid two">
+      <div class="form-group"><label>التاريخ (سابق مسموح)</label><input type="date" id="seD" value="${todayISO()}"></div>
+      <div class="form-group"><label>الوقت</label><input type="time" id="seT" value=""></div>
+    </div>
+    <div id="seAtt"><p style="font-size:12px;color:var(--muted)">اختر المجموعة لعرض الطلاب</p></div>
   `,`<button class="btn btn-outline btn-sm" onclick="closeModal()">إلغاء</button>
     <button class="btn btn-primary btn-sm" onclick="saveSession()">حفظ</button>`);
+  if(preGroupId) onSeG();
+}
+function onSessionSearch(){
+  const q=($("seSearch")?.value||"").trim().toLowerCase();
+  const box=$("seSearchResults");
+  if(!box) return;
+  if(q.length<1){box.innerHTML="";return}
+  const hits=[];
+  cache.groups.forEach(g=>{
+    const te=cache.teachers.find(x=>(g.teacherIds||[]).includes(x.id));
+    if((g.name||"").toLowerCase().includes(q)||(te?.name||"").toLowerCase().includes(q))
+      hits.push({type:"group",id:g.id,label:`مجموعة: ${g.name} — ${te?.name||""}`});
+  });
+  cache.teachers.filter(x=>!isPaused(x)).forEach(te=>{
+    if((te.name||"").toLowerCase().includes(q))
+      hits.push({type:"teacher",id:te.id,label:`معلم: ${te.name}`});
+  });
+  cache.students.filter(x=>!isPaused(x)).forEach(st=>{
+    if((st.name||"").toLowerCase().includes(q))
+      hits.push({type:"student",id:st.id,label:`طالب: ${st.name}`});
+  });
+  box.innerHTML=hits.slice(0,12).map(h=>`
+    <div class="session-search-item" onclick="pickSessionSearch('${h.type}','${h.id}')">${sanitize(h.label)}</div>
+  `).join("")||`<p style="font-size:12px;color:var(--muted)">لا نتائج</p>`;
+}
+function pickSessionSearch(type,id){
+  let groupId="";
+  if(type==="group") groupId=id;
+  else if(type==="teacher"){
+    const g=cache.groups.find(x=>(x.teacherIds||[]).includes(id));
+    groupId=g?.id||"";
+  }else if(type==="student"){
+    const st=cache.students.find(x=>x.id===id);
+    groupId=(st?.enrollments||[])[0]?.groupId||"";
+  }
+  if(!groupId){toast("لا مجموعة مرتبطة","err");return}
+  if($("seG")) $("seG").value=groupId;
+  if($("seSearchResults")) $("seSearchResults").innerHTML="";
+  if($("seSearch")) $("seSearch").value="";
+  onSeG();
 }
 function onSeG(){
   const gid=$("seG")?.value;
@@ -1086,15 +1223,19 @@ function onSeG(){
 }
 async function saveSession(){
   if(!requirePerm("registerSession")) return;
-  const groupId=$("seG").value,date=$("seD").value;
-  if(!groupId||!date){toast("أكمل","err");return}
+  const groupId=$("seG").value,date=$("seD").value,time=($("seT")?.value||"").trim();
+  if(!groupId||!date){toast("أكمل المجموعة والتاريخ","err");return}
   const g=cache.groups.find(x=>x.id===groupId);
   const teacherId=(g?.teacherIds||[])[0];
   if(!teacherId){toast("لا معلم للمجموعة","err");return}
   const attendance=[...document.querySelectorAll(".attSel")].map(sel=>({studentId:sel.dataset.sid,status:sel.value}));
-  const t=cache.teachers.find(x=>x.id===teacherId);
+  const te=cache.teachers.find(x=>x.id===teacherId);
   try{
-    await db.collection("center_sessions").add({groupId,teacherId,date,attendance,status:"approved",rateAtTime:t?.payMode==="per_student"?null:Number(t?.ratePerSession||0),createdAt:Date.now()});
+    await db.collection("center_sessions").add({
+      groupId,teacherId,date,time,attendance,status:"approved",
+      rateAtTime:te?.payMode==="per_student"?null:Number(te?.ratePerSession||0),
+      createdAt:Date.now()
+    });
     closeModal();toast("تم تسجيل الجلسة","ok");
   }catch(e){toast(e.message,"err")}
 }
