@@ -162,7 +162,7 @@ button,input,select,textarea{font-family:inherit;font-size:14px}
   </aside>
   <main class="main" id="mainContent"></main>
   <div class="bottom-back" id="bottomBack">
-    <button type="button" class="btn" onclick="goPage('home')">← رجوع للطلاب</button>
+    <button type="button" class="btn" onclick="goBackNav()">← الرجوع للخلف</button>
   </div>
 </div>
 <div class="modal-overlay" id="modalOverlay">
@@ -290,13 +290,21 @@ function buildDrawer(){
   const roleEl=$("drawerRole");
   if(roleEl) roleEl.textContent=isOwner()?"👑 مالك السنتر":"🛡️ مشرف مساعد";
 }
-function goPage(id){
+let pageHistory=[];
+function goPage(id,skipHist){
   const item=NAV.find(n=>n.id===id);
-  if(item?.perm&&!can(item.perm)){toast("ليس لديك صلاحية لفتح هذه الصفحة","err");return}
-  currentPage=id;closeDrawer();buildDrawer();renderPage();
-  $("bottomBack").classList.toggle("show",id!=="home");
+  if(item&&item.perm&&!can(item.perm)){toast("ليس لديك صلاحية","err");return}
+  if(!skipHist && currentPage && currentPage!==id) pageHistory.push(currentPage);
+  if(pageHistory.length>20) pageHistory.shift();
+  currentPage=id;closeDrawer();renderPage();
   window.scrollTo(0,0);
 }
+function goBackNav(){
+  const prev=pageHistory.pop();
+  if(prev) goPage(prev,true);
+  else goPage("home",true);
+}
+
 
 async function doLogin(){
   const phone=$("loginPhone").value.trim(),pass=$("loginPass").value;
@@ -367,11 +375,15 @@ function applyCenterBranding(){
   document.title=title;
   const el=document.querySelector(".login-title");
   if(el) el.textContent=title;
+  const top=$("topTitle");
+  if(top) top.textContent=title;
   const logoImg=$("centerLogoImg");
   const logoLogin=$("loginLogo");
   if(centerMeta.logoData){
     if(logoImg){logoImg.src=centerMeta.logoData;logoImg.style.display="block"}
     if(logoLogin){logoLogin.src=centerMeta.logoData;logoLogin.style.display="block"}
+  }else{
+    if(logoLogin) logoLogin.style.display="none";
   }
 }
 async function loadAll(){
@@ -393,6 +405,9 @@ async function loadAll(){
 }
 /* سحب للتحديث + فلاتر القوائم */
 let listFilter={students:"all",teachers:"all",groups:"all"};
+let pageQ={};
+let collectFilter={q:"",month:""};
+
 let pullStartY=0,pulling=false;
 function setupPullRefresh(){
   const main=$("mainContent");
@@ -735,8 +750,8 @@ function renderHome(){
       <div class="stat-label">مجموعات — اضغط</div>
     </div>
     <div class="stat-card warn ${homePanel==="collect"?"active-filter":""}" style="cursor:pointer" onclick="setHomePanel('collect')">
-      <div class="stat-num">${money(monthTotal)}</div>
-      <div class="stat-label">متحصَّل هذا الشهر — اضغط</div>
+      <div class="stat-num">${money((cache.payments||[]).filter(p=>p.type==="student_payment"||p.type==="teacher_payment").reduce((s,p)=>s+Number(p.amount||0),0))}</div>
+      <div class="stat-label">المتحصلات (كل الفترات) — اضغط</div>
     </div>
     <div class="stat-card ${homePanel==="expected"?"active-filter":""}" style="cursor:pointer" onclick="setHomePanel('expected')">
       <div class="stat-num">${money(expectedMonth)}</div>
@@ -785,19 +800,48 @@ function renderHome(){
     }).join("")||`<div class="empty-state"><p>لا مجموعات</p></div>`;
     detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">المجموعات (${groups.length})</div>${detail}</div>`;
   }else if(homePanel==="collect"){
-    const list=monthPays.slice().sort((a,b)=>(b.at||0)-(a.at||0));
-    detail=list.map(p=>`<div class="list-item ok"><div>
-      <div class="item-title">${sanitize(p.studentName||"طالب")}${p.settlementLabel?` · ${sanitize(p.settlementLabel)}`:""}</div>
-      <div class="item-meta">${money(p.amount)} ج · ${sanitize(p.payDate||fmtDate(p.at))}${p.note?" · "+sanitize(p.note):""}</div>
-    </div>
-    ${can("collectStudent")?`<button class="btn btn-outline btn-sm" onclick="editPayment('${p.id}')">تعديل</button>`:""}
-    </div>`).join("")||`<div class="empty-state"><p>لا تحصيل هذا الشهر</p></div>`;
-    detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">متحصَّلات الشهر (${money(monthTotal)} ج)</div>${detail}</div>`;
+    const q=(collectFilter.q||"").trim().toLowerCase();
+    const mk=(collectFilter.month||"").trim();
+    let list=(cache.payments||[]).filter(p=>p.type==="student_payment"||p.type==="teacher_payment");
+    if(mk) list=list.filter(p=>monthKey(p.payDate||(p.at?new Date(p.at).toISOString().slice(0,10):""))===mk);
+    if(q) list=list.filter(p=>{
+      const n=((p.studentName||"")+" "+(p.teacherName||"")+" "+(p.groupName||"")+" "+(p.settlementLabel||"")+" "+(p.note||"")).toLowerCase();
+      return n.includes(q);
+    });
+    list=list.slice().sort((a,b)=>(b.at||0)-(a.at||0));
+    const total=list.reduce((s,p)=>s+Number(p.amount||0),0);
+    const monthsSet=new Set(list.map(p=>monthKey(p.payDate||(p.at?new Date(p.at).toISOString().slice(0,10):""))).filter(Boolean));
+    const stuT=list.filter(p=>p.type==="student_payment").reduce((s,p)=>s+Number(p.amount||0),0);
+    const teaT=list.filter(p=>p.type==="teacher_payment").reduce((s,p)=>s+Number(p.amount||0),0);
+    detail=list.map(p=>{
+      const isStu=p.type==="student_payment";
+      return `<div class="list-item ${isStu?"ok":""}"><div>
+        <div class="item-title">${isStu?"تحصيل: "+sanitize(p.studentName||"طالب"):"صرف معلم: "+sanitize(p.teacherName||"")}${p.settlementLabel?` · ${sanitize(p.settlementLabel)}`:""}${p.groupName?` · ${sanitize(p.groupName)}`:""}</div>
+        <div class="item-meta">${money(p.amount)} ج · ${sanitize(p.payDate||fmtDate(p.at))}${p.note?" · "+sanitize(p.note):""}</div>
+      </div>
+      ${(isStu&&can("collectStudent"))||(!isStu&&can("payTeacher"))?`<button class="btn btn-outline btn-sm" onclick="editPayment('${p.id}')">تعديل</button>`:""}
+      </div>`;
+    }).join("")||`<div class="empty-state"><p>لا نتائج للفلتر</p></div>`;
+    detail=`<div id="homeDetailPanel">
+      <div class="card-title" style="margin-bottom:10px">كل المتحصلات (طلاب + معلمون)</div>
+      <div class="form-grid two" style="margin-bottom:10px">
+        <div class="form-group"><label>بحث بالاسم</label><input id="cfQ" value="${sanitize(collectFilter.q||"")}" placeholder="طالب / معلم / مجموعة" oninput="collectFilter.q=this.value;renderPage()"></div>
+        <div class="form-group"><label>شهر (YYYY-MM)</label><input id="cfM" value="${sanitize(collectFilter.month||"")}" placeholder="2026-03" oninput="collectFilter.month=this.value;renderPage()"></div>
+      </div>
+      <div class="stats-grid" style="margin-bottom:12px">
+        <div class="stat-card success"><div class="stat-num">${money(total)}</div><div class="stat-label">إجمالي المفلتر</div></div>
+        <div class="stat-card"><div class="stat-num">${monthsSet.size}</div><div class="stat-label">عدد الأشهر</div></div>
+        <div class="stat-card ok"><div class="stat-num">${money(stuT)}</div><div class="stat-label">من الطلاب</div></div>
+        <div class="stat-card warn"><div class="stat-num">${money(teaT)}</div><div class="stat-label">للمعلمين</div></div>
+      </div>
+      <button type="button" class="btn btn-outline btn-sm" style="margin-bottom:10px" onclick="collectFilter={q:'',month:''};renderPage()">مسح الفلتر</button>
+      ${detail}
+    </div>`;
   }else if(homePanel==="expected"){
     const rows=activeStu.map(s=>{
       const f=studentFinance(s);
       return {s,f};
-    }).filter(x=>x.f.expectedThisMonth>0||(x.f.settlements||[]).length);
+    }).filter(x=>x.f.showDue||x.f.expectedThisMonth>0||(x.f.openSettlements||[]).length);
     detail=rows.map(({s,f})=>{
       const sett=(f.settlements||[]).map(x=>`
         <div class="sess-day" style="${x.open?'color:var(--danger);font-weight:bold':''}">
@@ -809,10 +853,28 @@ function renderHome(){
           <div class="item-title">${sanitize(s.name)} <span class="expand-hint">— اضغط للتفاصيل</span></div>
           <div class="item-meta">متوقع هذا الشهر: <b>${money(f.expectedThisMonth)} ج</b> · إجمالي متبقي ${money(f.unpaid)}</div>
         </div>
+        <div class="item-actions" onclick="event.stopPropagation()">
+          ${can("collectStudent")&&f.showDue?`<button class="btn btn-success btn-sm" onclick="openStudentPay('${s.id}')">استلام مستحقات</button>`:""}
+        </div>
         <div class="fold-body" onclick="event.stopPropagation()">${sett}</div>
       </div>`;
     }).join("")||`<div class="empty-state"><p>لا مبالغ متوقعة</p></div>`;
-    detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">إجمالي متوقع هذا الشهر: ${money(expectedMonth)} ج</div>${detail}</div>`;
+    // متوقع معلمين (دورات مكتملة هذا الشهر تقريباً)
+    let teaExp="";
+    const teaDue=cache.teachers.filter(x=>!isPaused(x)).map(te=>{
+      const sc=teacherDueScore(te);
+      return {te,sc};
+    }).filter(x=>x.sc.fullPending>0);
+    if(teaDue.length){
+      teaExp=`<div class="card-title" style="margin:16px 0 10px">مستحقات معلمين مكتملة (واجبة)</div>`+
+        teaDue.map(({te,sc})=>`<div class="list-item due"><div>
+          <div class="item-title">${sanitize(te.name)}</div>
+          <div class="item-meta">${sc.fullPending} دورة مكتملة · متبقي تقريبي ${money(sc.dueAmount)} ج</div>
+        </div>
+        <button class="btn btn-outline btn-sm" onclick="goPage('teacherSettle')">عرض</button>
+        </div>`).join("");
+    }
+    detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">إجمالي متوقع الطلاب هذا الشهر: ${money(expectedMonth)} ج</div>${detail}${teaExp}</div>`;
   }else{
     detail=`<div id="homeDetailPanel"><p style="font-size:13px;color:var(--muted)">اضغط أي كرت لعرض التفاصيل بالأسفل</p></div>`;
   }
@@ -826,11 +888,16 @@ function renderHome(){
 }
 
 function renderStudentDues(){
+  const q=(pageQ.studentDues||"").trim().toLowerCase();
   const rows=cache.students.filter(s=>!isPaused(s)).map(s=>{
     const f=studentFinance(s);
     const lastPay=(cache.payments||[]).filter(p=>p.type==="student_payment"&&p.studentId===s.id).sort((a,b)=>(b.at||0)-(a.at||0))[0];
     return {s,f,lastPay};
-  }).filter(({f})=>f.showDue).sort((a,b)=>b.f.unpaid-a.f.unpaid||b.f.dueSessions-a.f.dueSessions);
+  }).filter(({s,f})=>{
+    if(!f.showDue) return false;
+    if(!q) return true;
+    return (s.name||"").toLowerCase().includes(q)||(s.phone||"").includes(q);
+  }).sort((a,b)=>b.f.unpaid-a.f.unpaid||b.f.dueSessions-a.f.dueSessions);
 
   const list=rows.map(({s,f,lastPay})=>{
     const ens=(s.enrollments||[]).map(e=>{
@@ -867,6 +934,7 @@ function renderStudentDues(){
   }).join("")||`<div class="empty-state"><p>لا مستحقات جارية على الطلاب 🎉</p></div>`;
 
   return `<div class="page-header"><h2>👨‍🎓 مستحقات الطلاب</h2></div>
+  <div class="search-bar"><input placeholder="بحث باسم الطالب أو الموبايل..." value="${sanitize(pageQ.studentDues||"")}" oninput="pageQ.studentDues=this.value;renderPage()"></div>
   <p style="font-size:12px;color:var(--muted);margin-bottom:10px">يظهر هنا فقط من حان موعد تسويته وعليه متبقي.</p>
   ${list}`;
 }
@@ -918,11 +986,17 @@ async function saveCenterSettings(){
 
 function renderTeacherSettle(){
   if(!cache.teachers.length) return `<div class="page-header"><h2>💵 مستحقات المعلمين</h2></div><div class="empty-state"><p>لا معلمون</p></div>`;
+  const q=(pageQ.teacherSettle||"").trim().toLowerCase();
   const sorted=[...cache.teachers].filter(t=>!isPaused(t)).map(t=>({t,sc:teacherDueScore(t)}))
-    .filter(x=>x.sc.score>0||x.sc.dueAmount>0).sort((a,b)=>b.sc.score-a.sc.score||b.sc.dueAmount-a.sc.dueAmount);
+    .filter(x=>{
+      if(q && !(x.t.name||"").toLowerCase().includes(q)) return false;
+      // كل المستحقات: مكتملة أو جارية غير مغلقة
+      return x.sc.score>0 || x.sc.dueAmount>0 || x.sc.fullPending>0;
+    }).sort((a,b)=>b.sc.score-a.sc.score||b.sc.dueAmount-a.sc.dueAmount);
   let html=`<div class="page-header"><h2>💵 مستحقات المعلمين</h2>
     <button class="btn btn-outline btn-sm" onclick="teacherShowArch=!teacherShowArch;renderPage()">📂 ${typeof teacherShowArch!=="undefined"&&teacherShowArch?"إخفاء المنتهية":"أرشيف المنتهية"}</button></div>
-  <p style="font-size:12px;color:var(--muted);margin-bottom:12px">أحمر فقط عند اكتمال الدورة (مثل 8/8) ووجود متبقي · الجارية غير المكتملة بدون أحمر · إنهاء التسوية يخفيها من الملخص</p>`;
+  <div class="search-bar"><input placeholder="بحث ذكي باسم المعلم..." value="${sanitize(pageQ.teacherSettle||"")}" oninput="pageQ.teacherSettle=this.value;renderPage()"></div>
+  <p style="font-size:12px;color:var(--muted);margin-bottom:12px">كل المستحقات هنا · أحمر عند اكتمال الدورة فقط · إنهاء التسوية يخفيها</p>`;
   if(!sorted.length) return html+`<div class="empty-state"><p>لا مستحقات جارية للمعلمين 🎉</p></div>`;
   sorted.forEach(({t,sc})=>{
     const groups=cache.groups.filter(g=>(g.teacherIds||[]).includes(t.id));
@@ -1050,11 +1124,15 @@ async function closeCycle(teacherId,groupId,cycleIndex){
 function renderGroups(){
   const f=listFilter.groups||"all";
   let items=cache.groups.slice();
-  // groups don't have paused - count by active teachers link; use all / empty students
-  const withStu=items.filter(g=>cache.students.some(s=>(s.enrollments||[]).some(e=>e.groupId===g.id)));
-  const empty=items.filter(g=>!cache.students.some(s=>(s.enrollments||[]).some(e=>e.groupId===g.id)));
-  if(f==="with") items=withStu;
-  else if(f==="empty") items=empty;
+  const withStu=cache.groups.filter(g=>cache.students.some(s=>(s.enrollments||[]).some(e=>e.groupId===g.id)));
+  const empty=cache.groups.filter(g=>!cache.students.some(s=>(s.enrollments||[]).some(e=>e.groupId===g.id)));
+  if(f==="with") items=withStu.slice();
+  else if(f==="empty") items=empty.slice();
+  const q=(pageQ.groups||"").trim().toLowerCase();
+  if(q) items=items.filter(g=>{
+    const te=cache.teachers.find(x=>(g.teacherIds||[]).includes(x.id));
+    return ((g.name||"")+" "+(te?.name||"")).toLowerCase().includes(q);
+  });
   const list=items.map(g=>{
     const te=cache.teachers.find(x=>(g.teacherIds||[])[0]===x.id||(g.teacherIds||[]).includes(x.id));
     const sts=cache.students.filter(s=>(s.enrollments||[]).some(e=>e.groupId===g.id));
@@ -1068,6 +1146,7 @@ function renderGroups(){
   }).join("")||`<div class="empty-state"><p>لا نتائج لهذا الفلتر</p></div>`;
   return `<div class="page-header"><h2>🔗 المجموعات (الربط)</h2>
     ${can("manageGroups")?`<button class="btn btn-primary btn-sm" onclick="openGroupForm()">+ مجموعة</button>`:""}</div>
+  <div class="search-bar"><input placeholder="بحث باسم المجموعة أو المعلم..." value="${sanitize(pageQ.groups||"")}" oninput="pageQ.groups=this.value;renderPage()"></div>
   <div class="filter-tabs">
     <div class="stat-card ${f==="all"?"active-filter":""}" onclick="setListFilter('groups','all')"><div class="stat-num">${cache.groups.length}</div><div class="stat-label">الكل</div></div>
     <div class="stat-card success ${f==="with"?"active-filter":""}" onclick="setListFilter('groups','with')"><div class="stat-num">${withStu.length}</div><div class="stat-label">بها طلاب</div></div>
@@ -1114,6 +1193,8 @@ function renderTeachers(){
   let items=cache.teachers.slice();
   if(f==="active") items=active;
   else if(f==="paused") items=paused;
+  const q=(pageQ.teachers||"").trim().toLowerCase();
+  if(q) items=items.filter(te=>((te.name||"")+" "+(te.phone||"")).toLowerCase().includes(q));
   const list=items.map(te=>{
     const cycle=(te.billingCycle==="monthly")?`شهري ${money(te.monthlySalary||0)} ج`:`كل ${te.sessionsPerCycle||8} حصص`;
     const pay=(te.payMode==="per_student")?`${money(te.ratePerStudent||0)}/طالب`:`${money(te.ratePerSession||0)}/جلسة`;
@@ -1127,6 +1208,7 @@ function renderTeachers(){
   }).join("")||`<div class="empty-state"><p>لا نتائج لهذا الفلتر</p></div>`;
   return `<div class="page-header"><h2>👨‍🏫 المعلمون</h2>
     ${can("addTeacher")?`<button class="btn btn-primary btn-sm" onclick="openTeacherForm()">+ معلم</button>`:""}</div>
+  <div class="search-bar"><input placeholder="بحث باسم المعلم أو الموبايل..." value="${sanitize(pageQ.teachers||"")}" oninput="pageQ.teachers=this.value;renderPage()"></div>
   <div class="filter-tabs">
     <div class="stat-card ${f==="all"?"active-filter":""}" onclick="setListFilter('teachers','all')"><div class="stat-num">${cache.teachers.length}</div><div class="stat-label">الكل</div></div>
     <div class="stat-card success ${f==="active"?"active-filter":""}" onclick="setListFilter('teachers','active')"><div class="stat-num">${active.length}</div><div class="stat-label">مفعّل</div></div>
@@ -1188,6 +1270,8 @@ function renderStudentsManage(){
   let source=cache.students;
   if(f==="active") source=active;
   else if(f==="paused") source=paused;
+  const q=(pageQ.students||"").trim().toLowerCase();
+  if(q) source=source.filter(s=>((s.name||"")+" "+(s.phone||"")+" "+(s.parentName||"")).toLowerCase().includes(q));
   const list=source.map(s=>{
     const ens=(s.enrollments||[]).map(e=>{
       const g=cache.groups.find(x=>x.id===e.groupId);
@@ -1220,6 +1304,7 @@ function renderStudentsManage(){
     <div class="stat-card success ${f==="active"?"active-filter":""}" onclick="setListFilter('students','active')"><div class="stat-num">${active.length}</div><div class="stat-label">مفعّل</div></div>
     <div class="stat-card danger ${f==="paused"?"active-filter":""}" onclick="setListFilter('students','paused')"><div class="stat-num">${paused.length}</div><div class="stat-label">متوقف</div></div>
   </div>
+  <div class="search-bar"><input placeholder="بحث ذكي: اسم / موبايل / ولي أمر..." value="${sanitize(pageQ.students||"")}" oninput="pageQ.students=this.value;renderPage()"></div>
   <p style="font-size:12px;color:var(--muted);margin-bottom:10px">اسحب للأسفل للتحديث · اضغط الكرت لعرض الفئة فقط</p>
   ${list}
   <div class="card" style="margin-top:16px">
