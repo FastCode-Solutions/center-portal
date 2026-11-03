@@ -456,7 +456,7 @@ function buildTeacherCycles(teacher,groupId){
     const remaining=Math.max(0,amount-paid);
     cycles.push({
       cycleIndex:c,cycleNum:c+1,sessions:slice.length,cycleSize,full,amount,paid,remaining,
-      closed:closed||(remaining<=0&&paid>0&&full),
+      closed:!!closed,
       lastPayDate:lastPay?(lastPay.payDate||fmtDate(lastPay.at)):null,
       lastPayNote:lastPay?(lastPay.note||""):"",
       groupId,teacherId:teacher.id,
@@ -513,12 +513,55 @@ function studentRequired(s){
 function studentPaid(s){
   return (cache.payments||[]).filter(p=>p.type==="student_payment"&&p.studentId===s.id).reduce((sum,p)=>sum+Number(p.amount||0),0);
 }
+/** هل حان موعد إظهار المستحق؟ مقدم=من البداية، مؤخر=بعد يوم الدفع من الشهر */
+function studentIsDueNow(s){
+  const ens=s.enrollments||[];
+  if(!ens.length) return false;
+  const today=new Date();
+  const day=today.getDate();
+  // لو أي تسجيل مؤخر ولم يأتِ يوم الدفع بعد، وباقي الأشهر السابقة محسوبة في المطلوب
+  let any=false;
+  ens.forEach(e=>{
+    any=true;
+    const timing=e.payTiming||"advance"; // advance | defer
+    const payDay=Math.min(28, Math.max(1, Number(e.payDay)||1));
+    if(e.type==="monthly" && timing==="defer" && day<payDay){
+      // هذا الشهر لم يحن بعد — نخصم شهر واحد من "الظهور" فقط إن كان المطلوب من شهر واحد جاري
+      // الظهور: false إذا كل المستحق من الشهر الحالي فقط
+    }
+  });
+  const f={required:studentRequired(s),paid:studentPaid(s)};
+  const unpaid=Math.max(0,f.required-f.paid);
+  if(unpaid<=0) return false;
+  // تحقق: لو كل الاشتراكات مؤخرة ولم يأتِ يوم الدفع، أخفِ إن كان المدفوع يغطي كل الأشهر ما عدا الحالي
+  let hide=true;
+  ens.forEach(e=>{
+    const timing=e.payTiming||"advance";
+    const payDay=Math.min(28, Math.max(1, Number(e.payDay)||1));
+    if(e.type!=="monthly"){ hide=false; return; }
+    if(timing==="advance"){ hide=false; return; }
+    if(day>=payDay){ hide=false; return; }
+    // مؤخر ولم يأتِ اليوم: لو عليه أكثر من شهر واحد يظهر
+    const months=countMonths(e.startDate||e.enrolledAt);
+    if(months>1) hide=false;
+  });
+  return !hide;
+}
 function studentFinance(s){
   const required=studentRequired(s),paid=studentPaid(s);
   let dueSessions=0;
   (s.enrollments||[]).forEach(e=>{if(e.type!=="monthly") dueSessions+=studentBillableCount(s,e)});
-  return {required,paid,unpaid:Math.max(0,required-paid),dueSessions};
+  const unpaid=Math.max(0,required-paid);
+  const showDue=unpaid>0 && studentIsDueNow(s);
+  // متوقع هذا الشهر من هذا الطالب
+  let expectedThisMonth=0;
+  (s.enrollments||[]).forEach(e=>{
+    if(e.type==="monthly") expectedThisMonth+=Number(e.monthlyPrice||0);
+    else expectedThisMonth+=Number(e.sessionRate||0); // تقديري حصة — أو الباقة موزعة
+  });
+  return {required,paid,unpaid,dueSessions,showDue,expectedThisMonth};
 }
+
 
 function renderPage(){
   const map={home:renderHome,teacherSettle:renderTeacherSettle,archive:renderArchive,sessions:renderSessions,schedule:renderSchedule,groups:renderGroups,teachers:renderTeachers,students:renderStudentsManage,staff:renderStaff,reports:renderReports};
@@ -564,6 +607,7 @@ function renderHome(){
   const groups=cache.groups||[];
   const monthPays=monthCollectPayments();
   const monthTotal=monthPays.reduce((s,p)=>s+Number(p.amount||0),0);
+  const expectedMonth=cache.students.filter(s=>!isPaused(s)).reduce((sum,s)=>sum+(studentFinance(s).expectedThisMonth||0),0);
 
   const cards=`<div class="stats-grid" style="margin-bottom:14px">
     <div class="stat-card success ${homePanel==="students"?"active-filter":""}" style="cursor:pointer" onclick="setHomePanel('students')">
@@ -582,6 +626,16 @@ function renderHome(){
       <div class="stat-num">${money(monthTotal)}</div>
       <div class="stat-label">متحصَّل هذا الشهر — اضغط</div>
     </div>
+    <div class="stat-card ${homePanel==="expected"?"active-filter":""}" style="cursor:pointer" onclick="setHomePanel('expected')">
+      <div class="stat-num">${money(expectedMonth)}</div>
+      <div class="stat-label">متوقع من الطلاب هذا الشهر — اضغط</div>
+    </div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
+    ${can("registerSession")?`<button class="btn btn-primary btn-sm" onclick="openSessionForm()">+ جلسة</button>`:""}
+    ${can("addStudent")?`<button class="btn btn-primary btn-sm" onclick="openStudentForm()">+ طالب</button>`:""}
+    ${can("manageGroups")?`<button class="btn btn-outline btn-sm" onclick="openGroupForm()">+ مجموعة</button>`:""}
+    ${can("addTeacher")?`<button class="btn btn-outline btn-sm" onclick="openTeacherForm()">+ معلم</button>`:""}
   </div>`;
 
   let detail="";
@@ -624,13 +678,23 @@ function renderHome(){
       <div class="item-meta">${money(p.amount)} ج · ${sanitize(p.payDate||fmtDate(p.at))}${p.note?" · "+sanitize(p.note):""}</div>
     </div></div>`).join("")||`<div class="empty-state"><p>لا تحصيل هذا الشهر</p></div>`;
     detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">متحصَّلات الشهر (${money(monthTotal)} ج)</div>${detail}</div>`;
+  }else if(homePanel==="expected"){
+    const rows=cache.students.filter(s=>!isPaused(s)).map(s=>{
+      const f=studentFinance(s);
+      return {s,f};
+    }).filter(x=>x.f.expectedThisMonth>0).sort((a,b)=>b.f.expectedThisMonth-a.f.expectedThisMonth);
+    detail=rows.map(({s,f})=>`<div class="list-item ${f.showDue?"due":"ok"}"><div>
+      <div class="item-title">${sanitize(s.name)}</div>
+      <div class="item-meta">متوقع هذا الشهر: <b>${money(f.expectedThisMonth)} ج</b> · مدفوع إجمالي ${money(f.paid)} · متبقي ${money(f.unpaid)}</div>
+    </div></div>`).join("")||`<div class="empty-state"><p>لا مبالغ متوقعة</p></div>`;
+    detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">إجمالي متوقع هذا الشهر: ${money(expectedMonth)} ج</div>${detail}</div>`;
   }else{
     // dues default list
     const rows=cache.students.filter(s=>!isPaused(s)).map(s=>{
       const f=studentFinance(s);
       const lastPay=(cache.payments||[]).filter(p=>p.type==="student_payment"&&p.studentId===s.id).sort((a,b)=>(b.at||0)-(a.at||0))[0];
       return {s,f,lastPay};
-    }).filter(({f})=>f.unpaid>0).sort((a,b)=>b.f.unpaid-a.f.unpaid||b.f.dueSessions-a.f.dueSessions);
+    }).filter(({f})=>f.showDue).sort((a,b)=>b.f.unpaid-a.f.unpaid||b.f.dueSessions-a.f.dueSessions);
 
     detail=rows.map(({s,f,lastPay})=>{
       const ens=(s.enrollments||[]).map(e=>{
@@ -676,13 +740,14 @@ function renderHome(){
   ${detail}`;
 }
 
+let teacherShowArch=false;
 function renderTeacherSettle(){
   if(!cache.teachers.length) return `<div class="page-header"><h2>💵 مستحقات المعلمين</h2></div><div class="empty-state"><p>لا معلمون</p></div>`;
   const sorted=[...cache.teachers].filter(t=>!isPaused(t)).map(t=>({t,sc:teacherDueScore(t)}))
     .filter(x=>x.sc.score>0||x.sc.dueAmount>0).sort((a,b)=>b.sc.score-a.sc.score||b.sc.dueAmount-a.sc.dueAmount);
   let html=`<div class="page-header"><h2>💵 مستحقات المعلمين</h2>
-    <button class="btn btn-outline btn-sm" onclick="goPage('archive')">📂 الأرشيف</button></div>
-  <p style="font-size:12px;color:var(--muted);margin-bottom:12px">التسويات الجارية والمستحقة فقط. المنتهية في الأرشيف.</p>`;
+    <button class="btn btn-outline btn-sm" onclick="teacherShowArch=!teacherShowArch;renderPage()">📂 ${typeof teacherShowArch!=="undefined"&&teacherShowArch?"إخفاء المنتهية":"أرشيف المنتهية"}</button></div>
+  <p style="font-size:12px;color:var(--muted);margin-bottom:12px">الجارية بالخارج · إنهاء التسوية يخفيها من الملخص · أحمر=متبقي · أخضر عند السداد الكامل</p>`;
   if(!sorted.length) return html+`<div class="empty-state"><p>لا مستحقات جارية للمعلمين 🎉</p></div>`;
   sorted.forEach(({t,sc})=>{
     const groups=cache.groups.filter(g=>(g.teacherIds||[]).includes(t.id));
@@ -690,7 +755,7 @@ function renderTeacherSettle(){
       ${sc.fullPending?`<span class="chip red">${sc.fullPending} واجبة السداد</span>`:""}
       <span class="chip">${(t.billingCycle==="monthly")?"شهري":"كل "+(t.sessionsPerCycle||8)+" حصة"}</span></div>`;
     groups.forEach(g=>{
-      const cycles=buildTeacherCycles(t,g.id).filter(cy=>!cy.closed);
+      const cycles=buildTeacherCycles(t,g.id).filter(cy=>teacherShowArch?cy.closed:!cy.closed);
       if(!cycles.length) return;
       cycles.sort((a,b)=>{
         const sa=(a.full&&a.remaining>0)?2:(a.remaining>0?1:0);
@@ -699,7 +764,7 @@ function renderTeacherSettle(){
       });
       html+=`<div style="margin:10px 0 6px;font-size:13px;font-weight:bold;color:var(--primary-dark)">📚 ${sanitize(g.name)}</div>`;
       cycles.forEach(cy=>{
-        const cls=(cy.full&&cy.remaining>0)?"due":(cy.remaining>0?"partial":"");
+        const cls=cy.remaining>0?"due":(cy.paid>0?"ok":"");
         const daysHtml=cy.sessionDetails.map(d=>`<div class="sess-day">${d.n}) ${sanitize(d.date)}${d.time?" · "+sanitize(d.time):""} · حاضر ${d.present}${d.absent?` · غائب ${d.absent}`:""} · ${money(d.amount)} ج</div>`).join("");
         html+=`<div class="cycle-row ${cls}" onclick="this.classList.toggle('open')">
           <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center">
@@ -712,7 +777,7 @@ function renderTeacherSettle(){
                 ${cy.lastPayNote?` · ${sanitize(cy.lastPayNote)}`:""}</div></div>
             <div class="item-actions" onclick="event.stopPropagation()">
               ${can("payTeacher")&&cy.amount>0&&cy.remaining>0?`<button class="btn btn-success btn-sm" onclick="openTeacherPay('${t.id}','${g.id}',${cy.cycleIndex},${cy.remaining})">تسديد المستحقات</button>`:""}
-              ${can("payTeacher")&&cy.paid>0&&cy.remaining<=0?`<button class="btn btn-outline btn-sm" onclick="closeCycle('${t.id}','${g.id}',${cy.cycleIndex})">منتهية</button>`:""}
+              ${can("payTeacher")?`<button class="btn btn-outline btn-sm" onclick="closeCycle('${t.id}','${g.id}',${cy.cycleIndex})">إنهاء التسوية</button>`:""}
             </div>
           </div>
           <div class="cycle-body" onclick="event.stopPropagation()">
@@ -798,7 +863,7 @@ async function saveTeacherPay(teacherId,groupId,cycleIndex){
 }
 async function closeCycle(teacherId,groupId,cycleIndex){
   if(!requirePerm("payTeacher")) return;
-  if(!confirm("تعليم التسوية كمنتهية؟")) return;
+  if(!confirm("إنهاء التسوية وإخفاؤها من الملخص الخارجي؟")) return;
   const t=cache.teachers.find(x=>x.id===teacherId);
   const closed={...(t.closedCycles||{})};
   if(!closed[groupId]) closed[groupId]={};
@@ -893,8 +958,17 @@ function renderTeachers(){
     <div class="stat-card danger ${f==="paused"?"active-filter":""}" onclick="setListFilter('teachers','paused')"><div class="stat-num">${paused.length}</div><div class="stat-label">متوقف</div></div>
   </div>
   <p style="font-size:12px;color:var(--muted);margin-bottom:10px">اسحب للأسفل للتحديث · اضغط الكرت لعرض الفئة فقط</p>
-  ${list}`;
+  ${list}
+  <div class="card" style="margin-top:16px">
+    <div class="card-title">📂 أرشيف الطلاب (خالص / بدون مستحق ظاهر)</div>
+    ${cache.students.filter(s=>{const f=studentFinance(s);return !f.showDue && f.paid>0;}).map(s=>{
+      const f=studentFinance(s);
+      return `<div class="list-item ok"><div class="item-title">${sanitize(s.name)}</div>
+        <div class="item-meta">مدفوع ${money(f.paid)} · مطلوب ${money(f.required)}</div></div>`;
+    }).join("")||`<p style="font-size:12px;color:var(--muted)">لا سجلات</p>`}
+  </div>`;
 }
+
 function openTeacherForm(id){
   if(!requirePerm("addTeacher")) return;
   const t=id?cache.teachers.find(x=>x.id===id):null;
@@ -992,7 +1066,7 @@ function openStudentForm(id){
     const sel=en&&en.groupId===g.id?"selected":"";
     return `<option value="${g.id}" ${sel}>${sanitize(g.name)} — ${sanitize(t?.name||"")}</option>`;
   }).filter(Boolean).join("");
-  const type=en?.type||"session";
+  const type=en?.type||"monthly";
   const defPackCnt=Number(en?.packageSessions)||8;
   const defPackTotal=(en?.packageTotal!=null && en?.packageTotal!=="") ? Number(en.packageTotal) : ((Number(en?.sessionRate)||0)*defPackCnt || 400);
   const defRate=Number(en?.sessionRate)||Math.round((defPackTotal/defPackCnt)*100)/100||50;
@@ -1021,6 +1095,16 @@ function openStudentForm(id){
         <input type="number" id="sMonth" min="0" value="${en?.monthlyPrice??200}"></div>
       <div class="form-group hide" id="sStartBox"><label>بداية الاشتراك الشهري</label>
         <input type="date" id="sStart" value="${sanitize(en?.startDate||todayISO())}"></div>
+      <div class="form-group"><label>الدفع</label>
+        <select id="sPayTiming">
+          <option value="advance" ${(en?.payTiming||"advance")==="advance"?"selected":""}>مقدَّم (من بداية المدة)</option>
+          <option value="defer" ${en?.payTiming==="defer"?"selected":""}>مؤخَّر (بعد يوم معيّن من الشهر)</option>
+        </select>
+      </div>
+      <div class="form-group"><label>يوم الدفع من الشهر (1–28)</label>
+        <input type="number" id="sPayDay" min="1" max="28" value="${en?.payDay??5}">
+        <p style="font-size:11px;color:var(--muted);margin-top:4px">مثال 8: يظهر مستحقاً من يوم 8 فقط (إن كان مؤخراً)</p>
+      </div>
       <div class="form-group" style="grid-column:1/-1">
         <label class="check-row"><input type="checkbox" id="sAbs" ${en?.chargeOnAbsence?"checked":""}><span>محاسبة الغياب على الطالب</span></label>
       </div>
@@ -1062,7 +1146,10 @@ async function saveStudent(id){
     if(!teacherId){toast("المجموعة بلا معلم","err");return}
     if(isPaused(cache.teachers.find(x=>x.id===teacherId))){toast("المعلم موقوف","err");return}
     const type=$("sBillType").value;
-    const entry={groupId,teacherId,type,chargeOnAbsence:!!$("sAbs")?.checked,enrolledAt:todayISO()};
+    const entry={groupId,teacherId,type,chargeOnAbsence:!!$("sAbs")?.checked,enrolledAt:todayISO(),
+      payTiming:$("sPayTiming")?.value||"advance",
+      payDay:Math.min(28,Math.max(1,Number($("sPayDay")?.value)||5))
+    };
     if(type==="monthly"){entry.monthlyPrice=Number($("sMonth").value)||0;entry.startDate=$("sStart").value||todayISO()}
     else {
       const packTotal=Number($("sPackTotal")?.value)||0;
@@ -1208,8 +1295,17 @@ function openEnroll(studentId){
   }).filter(Boolean).join("");
   openModal("ربط طالب بمجموعة — "+(s?.name||""),`
     <div class="form-group"><label>المجموعة *</label><select id="enGroup"><option value="">—</option>${gOpts}</select></div>
-    <div class="form-group"><label>حساب الطالب</label><select id="enType" onchange="onEnType()"><option value="session">بالحصة</option><option value="monthly">بالشهر</option></select></div>
-    <div id="enSBox">
+    <div class="form-group"><label>حساب الطالب</label>
+      <select id="enType" onchange="onEnType()">
+        <option value="monthly" selected>بالشهر</option>
+        <option value="session">بالحصة</option>
+      </select>
+    </div>
+    <div class="form-group"><label>الدفع</label>
+      <select id="enPayTiming"><option value="advance">مقدَّم</option><option value="defer" selected>مؤخَّر</option></select>
+    </div>
+    <div class="form-group"><label>يوم الدفع (1–28)</label><input type="number" id="enPayDay" min="1" max="28" value="5"></div>
+    <div id="enSBox" class="hide">
       <div class="form-group"><label>إجمالي مبلغ الباقة (ج)</label><input type="number" id="enPackTotal" value="400" oninput="calcEnRate()"></div>
       <div class="form-group"><label>عدد حصص الباقة</label><input type="number" id="enPackCnt" min="1" value="8" oninput="calcEnRate()"></div>
       <div class="form-group"><label>سعر الحصة (تلقائي)</label><input type="number" id="enRate" value="50" readonly style="background:#f0f4f8">
@@ -1219,6 +1315,7 @@ function openEnroll(studentId){
     <label class="check-row"><input type="checkbox" id="enAbs"><span>محاسبة الغياب على الطالب</span></label>
   `,`<button class="btn btn-outline btn-sm" onclick="closeModal()">إلغاء</button>
     <button class="btn btn-primary btn-sm" onclick="saveEnroll('${studentId}')">حفظ الربط</button>`);
+  onEnType();
 }
 function onEnType(){const t=$("enType")?.value;$("enSBox")?.classList.toggle("hide",t==="monthly");$("enMBox")?.classList.toggle("hide",t!=="monthly");if(t!=="monthly")calcEnRate()}
 function calcEnRate(){
@@ -1239,7 +1336,7 @@ async function saveEnroll(studentId){
   if(!teacherId){toast("المجموعة بلا معلم","err");return}
   if(isPaused(cache.teachers.find(x=>x.id===teacherId))){toast("المعلم موقوف","err");return}
   const type=$("enType").value;
-  const entry={groupId,teacherId,type,chargeOnAbsence:!!$("enAbs")?.checked,enrolledAt:todayISO()};
+  const entry={groupId,teacherId,type,chargeOnAbsence:!!$("enAbs")?.checked,enrolledAt:todayISO(),payTiming:$("enPayTiming")?.value||"advance",payDay:Math.min(28,Math.max(1,Number($("enPayDay")?.value)||5))};
   if(type==="monthly"){entry.monthlyPrice=Number($("enMonth").value)||0;entry.startDate=$("enStart").value||todayISO()}
   else {
     const packTotal=Number($("enPackTotal")?.value)||0;
@@ -1277,6 +1374,35 @@ async function saveStudentPay(){
     await db.collection("center_payments").add({type:"student_payment",studentId,studentName:s?.name||"",amount,payDate:$("spDate").value||todayISO(),note:$("spNote").value.trim(),at:Date.now(),by:currentUser.uid});
     closeModal();toast("تم","ok");
   }catch(e){toast(e.message,"err")}
+}
+
+function editPayment(payId){
+  const p=(cache.payments||[]).find(x=>x.id===payId);
+  if(!p){toast("غير موجود","err");return}
+  if(p.type==="student_payment"&&!requirePerm("collectStudent")) return;
+  if(p.type==="teacher_payment"&&!requirePerm("payTeacher")) return;
+  openModal("تعديل عملية دفع",`
+    <div class="form-group"><label>المبلغ</label><input type="number" id="edAmt" value="${p.amount||0}"></div>
+    <div class="form-group"><label>التاريخ</label><input type="date" id="edDate" value="${sanitize(p.payDate||"")}"></div>
+    <div class="form-group"><label>ملاحظة</label><input id="edNote" value="${sanitize(p.note||"")}"></div>
+  `,`<button class="btn btn-outline btn-sm" onclick="closeModal()">إلغاء</button>
+    <button class="btn btn-danger btn-sm" onclick="deletePayment('${payId}')">حذف</button>
+    <button class="btn btn-primary btn-sm" onclick="saveEditPayment('${payId}')">حفظ</button>`);
+}
+async function saveEditPayment(payId){
+  const amount=Number($("edAmt").value)||0;
+  if(amount<=0){toast("مبلغ غير صالح","err");return}
+  try{
+    await db.collection("center_payments").doc(payId).update({
+      amount, payDate:$("edDate").value||todayISO(), note:($("edNote").value||"").trim(), updatedAt:Date.now()
+    });
+    closeModal();toast("تم التعديل","ok");
+  }catch(e){toast(e.message,"err")}
+}
+async function deletePayment(payId){
+  if(!confirm("حذف هذه العملية؟")) return;
+  try{await db.collection("center_payments").doc(payId).delete();closeModal();toast("تم الحذف","ok")}
+  catch(e){toast(e.message,"err")}
 }
 
 function renderSessions(){
@@ -1521,19 +1647,24 @@ function inRange(dateStr, from, to){
   if(to && d>to) return false;
   return true;
 }
-function getReportRange(){
-  const from=($("repFrom")&&$("repFrom").value)||reportRange.from;
-  const to=($("repTo")&&$("repTo").value)||reportRange.to;
-  reportRange.from=from; reportRange.to=to;
-  return {from,to};
-}
 let reportRange={from:"",to:""};
+function getReportRange(){
+  if(!reportRange.from||!reportRange.to) defaultReportRange();
+  return {from:reportRange.from,to:reportRange.to};
+}
 function defaultReportRange(){
   const now=new Date();
   const y=now.getFullYear(), m=String(now.getMonth()+1).padStart(2,"0");
   reportRange.from=y+"-"+m+"-01";
   reportRange.to=todayISO();
 }
+function applyReportDates(){
+  const f=$("repFrom")?.value, to=$("repTo")?.value;
+  if(f) reportRange.from=f;
+  if(to) reportRange.to=to;
+  renderPage();
+}
+
 function paymentsInRange(type){
   const {from,to}=getReportRange();
   return (cache.payments||[]).filter(p=>{
@@ -1573,8 +1704,8 @@ function renderReports(){
   <div class="card">
     <div class="card-title">الفترة</div>
     <div class="form-grid two">
-      <div class="form-group"><label>من تاريخ</label><input type="date" id="repFrom" value="${sanitize(from)}" onchange="reportRange.from=this.value;renderPage()"></div>
-      <div class="form-group"><label>إلى تاريخ</label><input type="date" id="repTo" value="${sanitize(to)}" onchange="reportRange.to=this.value;renderPage()"></div>
+      <div class="form-group"><label>من تاريخ</label><input type="date" id="repFrom" value="${sanitize(from)}" onchange="applyReportDates()"></div>
+      <div class="form-group"><label>إلى تاريخ</label><input type="date" id="repTo" value="${sanitize(to)}" onchange="applyReportDates()"></div>
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
       <button type="button" class="btn btn-outline btn-sm" onclick="setReportPreset('month')">هذا الشهر</button>
