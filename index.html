@@ -253,6 +253,19 @@ const NAV=[
 let centerMeta={name:"بوابة السنتر",logoData:""};
 
 
+function waLink(phone){
+  let d=String(phone||"").replace(/[^0-9]/g,"");
+  if(!d) return "";
+  if(d.startsWith("00")) d=d.slice(2);
+  if(d.startsWith("0")&&d.length>=10) d="20"+d.slice(1);
+  if(!d.startsWith("20")&&d.length<=11) d="20"+d;
+  return "https://wa.me/"+d;
+}
+function waBtn(phone,label){
+  const href=waLink(phone);
+  if(!href) return "";
+  return `<a class="btn btn-success btn-sm" href="${href}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="text-decoration:none">💬 ${label||"واتساب"}</a>`;
+}
 function isPaused(p){return !!(p&&(p.paused===true||p.active===false))}
 function pauseReminderDue(p){if(!isPaused(p)||!p.pauseRemindAt) return false;return p.pauseRemindAt<=todayISO()}
 function getPauseNotifications(){
@@ -406,7 +419,7 @@ async function loadAll(){
 /* سحب للتحديث + فلاتر القوائم */
 let listFilter={students:"all",teachers:"all",groups:"all"};
 let pageQ={};
-let collectFilter={q:"",month:""};
+let collectFilter={q:"",month:"",year:null};
 
 let pullStartY=0,pulling=false;
 function setupPullRefresh(){
@@ -663,7 +676,12 @@ function buildStudentSettlements(s){
       });
     }
   });
-  // رصيد غير موزع (مدفوعات قديمة بدون ربط)
+  // الأحدث أولاً
+  settlements.sort((a,b)=>{
+    const ka=a.ym||a.dueDate||"";
+    const kb=b.ym||b.dueDate||"";
+    return String(kb).localeCompare(String(ka));
+  });
   const unassignedLeft=pool;
   return {settlements, unassignedPaid:unassignedLeft};
 }
@@ -680,11 +698,20 @@ function studentFinance(s){
   const showDue=openSettlements.length>0;
   let dueSessions=0;
   (s.enrollments||[]).forEach(e=>{if(e.type!=="monthly") dueSessions+=studentBillableCount(s,e)});
+  // متوقع هذا الشهر = المتبقي فقط من تسويات الشهر الحالي (المدفوع ينتقل للمتحصلات)
+  const curYM=todayISO().slice(0,7);
   let expectedThisMonth=0;
-  (s.enrollments||[]).forEach(e=>{
-    if(e.type==="monthly") expectedThisMonth+=Number(e.monthlyPrice||0);
-    else expectedThisMonth+=Number(e.sessionRate||0);
+  settlements.forEach(x=>{
+    const inMonth=(x.ym&&x.ym===curYM)||(x.dueDate&&String(x.dueDate).slice(0,7)===curYM);
+    if(inMonth) expectedThisMonth+=Number(x.remaining||0);
   });
+  // إن لم توجد تسوية شهرية بعد: يظهر السعر الكامل كمتوقع
+  if(expectedThisMonth===0 && !settlements.some(x=>(x.ym&&x.ym===curYM)||(x.dueDate&&String(x.dueDate).slice(0,7)===curYM))){
+    (s.enrollments||[]).forEach(e=>{
+      if(e.type==="monthly") expectedThisMonth+=Number(e.monthlyPrice||0);
+      else expectedThisMonth+=Number(e.sessionRate||0);
+    });
+  }
   return {required,paid,unpaid,dueSessions,showDue,expectedThisMonth,settlements,openSettlements,unassignedPaid:built.unassignedPaid||0};
 }
 
@@ -743,6 +770,19 @@ function showNotifPanel(){
     </div>`).join(""));
 }
 
+
+const WEEK_DAYS=[
+  {id:6,label:"السبت"},
+  {id:0,label:"الأحد"},
+  {id:1,label:"الاثنين"},
+  {id:2,label:"الثلاثاء"},
+  {id:3,label:"الأربعاء"},
+  {id:4,label:"الخميس"},
+  {id:5,label:"الجمعة"}
+];
+function weekDayName(d){const x=WEEK_DAYS.find(w=>w.id===Number(d));return x?x.label:String(d)}
+function todayWeekId(){return new Date().getDay()} // 0=Sun .. 6=Sat
+
 function monthCollectPayments(){
   const mk=monthKey();
   return (cache.payments||[]).filter(p=>p.type==="student_payment"&&monthKey(p.payDate||(p.at?new Date(p.at).toISOString().slice(0,10):""))===mk);
@@ -785,6 +825,13 @@ function refreshCollectOnly(){
 
 function setHomePanel(panel){
   homePanel=panel;
+  if(panel==="collect"){
+    const mk=monthKey();
+    if(!collectFilter.month){
+      collectFilter.month=mk;
+      collectFilter.year=Number(mk.slice(0,4));
+    }
+  }
   if(currentPage!=="home"){goPage("home");return}
   renderPage();
   setTimeout(()=>{
@@ -816,8 +863,8 @@ function renderHome(){
       <div class="stat-label">مجموعات — اضغط</div>
     </div>
     <div class="stat-card warn ${homePanel==="collect"?"active-filter":""}" style="cursor:pointer" onclick="setHomePanel('collect')">
-      <div class="stat-num">${money((cache.payments||[]).filter(p=>p.type==="student_payment"||p.type==="teacher_payment").reduce((s,p)=>s+Number(p.amount||0),0))}</div>
-      <div class="stat-label">المتحصلات (كل الفترات) — اضغط</div>
+      <div class="stat-num">${money(monthTotal)}</div>
+      <div class="stat-label">متحصَّل هذا الشهر — اضغط</div>
     </div>
     <div class="stat-card ${homePanel==="expected"?"active-filter":""}" style="cursor:pointer" onclick="setHomePanel('expected')">
       <div class="stat-num">${money(expectedMonth)}</div>
@@ -842,7 +889,10 @@ function renderHome(){
         <div class="item-title">${sanitize(s.name)}</div>
         <div class="item-meta">${sanitize(s.phone||"—")} · ${ens}</div>
       </div>
-      ${can("addStudent")?`<button class="btn btn-outline btn-sm" onclick="openStudentForm('${s.id}')">تعديل</button>`:""}
+      <div class="item-actions">
+        ${waBtn(s.phone)}
+        ${can("addStudent")?`<button class="btn btn-outline btn-sm" onclick="openStudentForm('${s.id}')">تعديل</button>`:""}
+      </div>
       </div>`;
     }).join("")||`<div class="empty-state"><p>لا طلاب نشطين</p></div>`;
     detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">الطلاب النشطون (${activeStu.length})</div>${detail}</div>`;
@@ -868,8 +918,13 @@ function renderHome(){
     detail=`<div id="homeDetailPanel"><div class="card-title" style="margin-bottom:10px">المجموعات (${groups.length})</div>${detail}</div>`;
   }else if(homePanel==="collect"){
     const q=(collectFilter.q||"").trim().toLowerCase();
+    // افتراضي: الشهر الحالي
+    if(!collectFilter.month && !collectFilter.year){
+      collectFilter.month=monthKey();
+      collectFilter.year=Number(monthKey().slice(0,4));
+    }
     const mk=(collectFilter.month||"").trim();
-    let list=(cache.payments||[]).filter(p=>p.type==="student_payment"||p.type==="teacher_payment");
+    let list=(cache.payments||[]).filter(p=>p.type==="student_payment");
     if(mk) list=list.filter(p=>monthKey(p.payDate||(p.at?new Date(p.at).toISOString().slice(0,10):""))===mk);
     else if(collectFilter.year) list=list.filter(p=>monthKey(p.payDate||(p.at?new Date(p.at).toISOString().slice(0,10):"")).slice(0,4)===String(collectFilter.year));
     if(q) list=list.filter(p=>{
@@ -900,15 +955,13 @@ function renderHome(){
       </div>`;
     }).join("")||`<div class="empty-state"><p>لا نتائج للفلتر</p></div>`;
     detail=`<div id="homeDetailPanel">
-      <div class="card-title" style="margin-bottom:10px">كل المتحصلات (طلاب + معلمون)</div>
+      <div class="card-title" style="margin-bottom:10px">متحصَّلات الطلاب</div>
       <div class="form-group"><label>بحث ذكي</label>
-        <input id="cfQ" value="${sanitize(collectFilter.q||"")}" placeholder="طالب / معلم / مجموعة / ملاحظة" autocomplete="off"></div>
+        <input id="cfQ" value="${sanitize(collectFilter.q||"")}" placeholder="اسم طالب / تسوية / ملاحظة" autocomplete="off"></div>
       ${duesFilterHTML("collect")}
       <div class="stats-grid" style="margin-bottom:12px">
         <div class="stat-card success"><div class="stat-num">${money(total)}</div><div class="stat-label">إجمالي المفلتر</div></div>
-        <div class="stat-card"><div class="stat-num">${monthsSet.size}</div><div class="stat-label">عدد الأشهر</div></div>
-        <div class="stat-card"><div class="stat-num">${money(stuT)}</div><div class="stat-label">من الطلاب</div></div>
-        <div class="stat-card warn"><div class="stat-num">${money(teaT)}</div><div class="stat-label">للمعلمين</div></div>
+        <div class="stat-card"><div class="stat-num">${list.length}</div><div class="stat-label">عدد العمليات</div></div>
       </div>
       <div id="collectListBox">${rows}</div>
     </div>`;
@@ -918,7 +971,10 @@ function renderHome(){
       const f=studentFinance(s);
       const monthSett=(f.settlements||[]).filter(x=>(x.ym&&x.ym===curYM)||(x.dueDate&&String(x.dueDate).slice(0,7)===curYM));
       return {s,f,monthSett};
-    }).filter(x=>x.monthSett.length>0 || x.f.expectedThisMonth>0);
+    }).filter(x=>{
+      const remain=(x.monthSett||[]).reduce((a,z)=>a+z.remaining,0);
+      return remain>0 || x.f.expectedThisMonth>0;
+    }).filter(x=>(x.monthSett||[]).some(z=>z.remaining>0) || (!(x.monthSett||[]).length && x.f.expectedThisMonth>0));
     detail=rows.map(({s,f,monthSett})=>{
       const open=monthSett.filter(x=>x.remaining>0);
       const primary=open[0]||monthSett[0];
@@ -928,7 +984,7 @@ function renderHome(){
       return `<div class="list-item ${monthDue?"due":"ok"}">
         <div style="flex:1;min-width:140px">
           <div class="item-title">${sanitize(s.name)}</div>
-          <div class="item-meta"><b>${sanitize(label)}</b><br>متوقع ${money(f.expectedThisMonth)} ج · متبقي ${money(remain)} ج</div>
+          <div class="item-meta"><b>${sanitize(label)}</b><br>متبقي للتحصيل: <b>${money(remain)} ج</b>${monthSett.some(x=>x.paid>0)?` · سُدد منها ${money(monthSett.reduce((a,x)=>a+x.paid,0))} ج`:""}</div>
         </div>
         <div class="item-actions">
           ${can("collectStudent")&&monthDue?`<button class="btn btn-success btn-sm" onclick="openStudentPay('${s.id}')">تسديد</button>`:""}
@@ -975,13 +1031,15 @@ function duesFilterHTML(kind){
   const ySel=Number(f.year)||new Date().getFullYear();
   const mi=f.month?Number(String(f.month).slice(5,7)):0;
   const mLabel=mi?AR_MONTHS[mi-1]:"كل الشهور";
-  const arrow=(fn,txt)=>`<button type="button" class="btn btn-outline btn-sm" style="min-width:42px" onclick="${fn}">${txt}</button>`;
+  const arrow=(fn,txt)=>`<button type="button" class="btn btn-outline btn-sm" style="min-width:36px;padding:8px 10px" onclick="${fn}">${txt}</button>`;
   return `<div class="card" style="padding:10px">
-    <div class="form-group" style="margin-bottom:8px"><label>السنة</label>
-      <div style="display:flex;gap:8px;align-items:center">${arrow("ymYear('"+kind+"',-1)","‹")}<b style="min-width:80px;text-align:center">${ySel}</b>${arrow("ymYear('"+kind+"',1)","›")}</div></div>
-    <div class="form-group" style="margin-bottom:10px"><label>الشهر</label>
-      <div style="display:flex;gap:8px;align-items:center">${arrow("ymMonth('"+kind+"',-1)","‹")}<b style="min-width:80px;text-align:center">${mLabel}</b>${arrow("ymMonth('"+kind+"',1)","›")}</div></div>
-    <button type="button" class="btn btn-outline btn-sm" onclick="duesClear('${kind}')">مسح الفلتر</button>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;justify-content:space-between">
+      <div class="form-group" style="margin:0;flex:1;min-width:140px"><label>السنة</label>
+        <div style="display:flex;gap:6px;align-items:center">${arrow("ymYear('"+kind+"',-1)","‹")}<b style="min-width:64px;text-align:center">${ySel}</b>${arrow("ymYear('"+kind+"',1)","›")}</div></div>
+      <div class="form-group" style="margin:0;flex:1;min-width:140px"><label>الشهر</label>
+        <div style="display:flex;gap:6px;align-items:center">${arrow("ymMonth('"+kind+"',-1)","‹")}<b style="min-width:72px;text-align:center">${mLabel}</b>${arrow("ymMonth('"+kind+"',1)","›")}</div></div>
+      <button type="button" class="btn btn-outline btn-sm" onclick="duesClear('${kind}')">مسح</button>
+    </div>
   </div>`;
 }
 function ymYear(kind,d){
@@ -1003,7 +1061,8 @@ function ymMonth(kind,d){
 function duesClear(kind){
   if(kind==="collect"){
     const el=$("cfQ"); if(el) el.value="";
-    collectFilter.q="";collectFilter.month="";collectFilter.year=null;
+    const mk=monthKey();
+    collectFilter.q="";collectFilter.month=mk;collectFilter.year=Number(mk.slice(0,4));
   }else{
     duesFilter[kind]={year:null,month:""};
     pageQ[DUES_QKEY[kind]]="";
@@ -1080,6 +1139,7 @@ function renderStudentDues(){
         <div class="item-meta">مطلوب ${money(required)} · مدفوع ${money(paid)} · <b style="color:${unpaid>0?"var(--danger)":"var(--success)"}">${unpaid>0?"عليه "+money(unpaid)+" ج":"خالص"}</b>
         ${lastPay?`<br>آخر استلام: ${sanitize(lastPay.payDate||fmtDate(lastPay.at))}`:""}</div>
       </div>
+      <div class="item-actions" onclick="event.stopPropagation()">${waBtn(s.phone)}</div>
       <div class="fold-body" onclick="event.stopPropagation()">
         <div style="margin-bottom:8px"><b>كل التسويات (مدفوع / غير مدفوع)</b></div>
         ${lines}${looseHtml}
@@ -1461,6 +1521,7 @@ function renderStudentsManage(){
         ${isPaused(s)&&s.pauseRemindAt?`<br>تذكير: ${sanitize(s.pauseRemindAt)}`:""}</div>
       </div>
       <div class="item-actions">
+        ${waBtn(s.phone)}
         ${can("addStudent")?`<button class="btn btn-outline btn-sm" onclick="openStudentForm('${s.id}')">تعديل</button>`:""}
         ${can("addStudent")&&!isPaused(s)?`<button class="btn btn-primary btn-sm" onclick="openEnroll('${s.id}')">ربط مجموعة</button>`:""}
         ${can("addStudent")?`<button class="btn ${isPaused(s)?"btn-success":"btn-danger"} btn-sm" onclick="togglePause('student','${s.id}')">${isPaused(s)?"تفعيل":"إيقاف"}</button>`:""}
@@ -1976,6 +2037,14 @@ function onSeG(){
         <option value="present">حاضر</option><option value="absent">غائب</option>
       </select></label>`).join(""):`<p style="color:var(--danger);font-size:13px">لا طلاب مربوطين</p>`;
 }
+function normTime(t){
+  t=String(t||"").trim();
+  if(!t) return "";
+  // 16:00 or 4:00 PM -> keep comparable HH:MM when possible
+  const m=t.match(/^(\d{1,2}):(\d{2})/);
+  if(m) return String(m[1]).padStart(2,"0")+":"+m[2];
+  return t;
+}
 async function saveSession(){
   if(!requirePerm("registerSession")) return;
   const groupId=$("seG").value,date=$("seD").value,time=($("seT")?.value||"").trim();
@@ -1983,6 +2052,14 @@ async function saveSession(){
   const g=cache.groups.find(x=>x.id===groupId);
   const teacherId=(g?.teacherIds||[])[0];
   if(!teacherId){toast("لا معلم للمجموعة","err");return}
+  const nt=normTime(time);
+  const dup=(cache.sessions||[]).find(s=>
+    s.groupId===groupId && s.date===date && normTime(s.time)===nt && s.status!=="cancelled"
+  );
+  if(dup){
+    toast("تم تسجيل جلسة لهذه المجموعة في نفس التاريخ والوقت مسبقاً","err");
+    return;
+  }
   const attendance=[...document.querySelectorAll(".attSel")].map(sel=>({studentId:sel.dataset.sid,status:sel.value}));
   const te=cache.teachers.find(x=>x.id===teacherId);
   try{
@@ -1995,47 +2072,200 @@ async function saveSession(){
   }catch(e){toast(e.message,"err")}
 }
 
+let scheduleDay=null; // يوم العرض المختار
+function scheduleOnDay(s, wd){
+  if(s.weekDay!=null && s.weekDay!=="") return Number(s.weekDay)===Number(wd);
+  if(Array.isArray(s.weekDays)&&s.weekDays.length) return s.weekDays.map(Number).includes(Number(wd));
+  // توافق قديم بتاريخ
+  if(s.date){
+    try{ return new Date(s.date+"T12:00:00").getDay()===Number(wd); }catch(e){return false}
+  }
+  return false;
+}
+function countSchedDay(wd){
+  return (cache.schedule||[]).filter(s=>scheduleOnDay(s,wd)).length;
+}
+function setScheduleDay(wd){
+  scheduleDay=Number(wd);
+  renderPage();
+}
+function formatTimeRange(s){
+  const a=s.timeFrom||s.time||"";
+  const b=s.timeTo||"";
+  if(a&&b) return a+" — "+b;
+  return a||"—";
+}
 function renderSchedule(){
-  const today=todayISO();
-  const items=(cache.schedule||[]).filter(s=>s.date===today);
+  if(scheduleDay==null) scheduleDay=todayWeekId();
+  const wd=scheduleDay;
+  const dayName=weekDayName(wd);
+  const items=(cache.schedule||[]).filter(s=>scheduleOnDay(s,wd))
+    .slice().sort((a,b)=>String(a.timeFrom||a.time||"").localeCompare(String(b.timeFrom||b.time||"")));
+
+  const tabs=WEEK_DAYS.map(d=>{
+    const n=countSchedDay(d.id);
+    const on=Number(wd)===d.id;
+    return `<button type="button" class="btn ${on?"btn-primary":"btn-outline"} btn-sm" style="border-radius:20px;min-width:auto;padding:8px 12px"
+      onclick="setScheduleDay(${d.id})">${d.label}${n?` (${n})`:""}</button>`;
+  }).join("");
+
   const list=items.map(s=>{
     const g=cache.groups.find(x=>x.id===s.groupId);
     const t=cache.teachers.find(x=>x.id===s.teacherId);
-    return `<div class="list-item"><div>
-      <div class="item-title">${sanitize(s.time||"—")} · ${sanitize(g?.name||s.title||"")}</div>
-      <div class="item-meta">المعلم: ${sanitize(t?.name||s.teacherName||"—")} ${s.note?"· "+sanitize(s.note):""}</div></div>
-      ${can("manageSchedule")||can("deleteData")?`<button class="btn btn-danger btn-sm" onclick="deleteSched('${s.id}')">حذف</button>`:""}
+    return `<div class="list-item" style="align-items:center">
+      <div style="flex:1">
+        <div class="item-title">📚 ${sanitize(g?.name||s.title||"—")}</div>
+        <div class="item-meta">المعلم: ${sanitize(t?.name||s.teacherName||"—")}<br>⏰ ${sanitize(formatTimeRange(s))}</div>
+      </div>
+      <div class="item-actions">
+        ${can("registerSession")?`<button class="btn btn-primary btn-sm" onclick="openSessionFromSched('${s.id}')">تسجيل جلسة</button>`:""}
+        ${can("manageSchedule")?`<button class="btn btn-outline btn-sm" onclick="openSchedEdit('${s.id}')">تعديل الوقت</button>`:""}
+        ${can("manageSchedule")||can("deleteData")?`<button class="btn btn-danger btn-sm" onclick="deleteSched('${s.id}')">حذف</button>`:""}
+      </div>
     </div>`;
-  }).join("")||`<div class="empty-state"><p>لا مواعيد اليوم</p></div>`;
-  return `<div class="page-header"><h2>📅 جدول اليوم (${today})</h2>
-    ${can("manageSchedule")?`<button class="btn btn-primary btn-sm" onclick="openSchedForm()">+ موعد</button>`:""}</div>${list}`;
+  }).join("")||`<div class="empty-state"><p>لا مواعيد يوم ${dayName}</p></div>`;
+
+  return `<div class="page-header"><h2>📅 جدول الحصص</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:6px">
+      ${can("manageSchedule")?`<button class="btn btn-outline btn-sm" onclick="exportScheduleReport()">📊 تقرير جدولي</button>`:""}
+      ${can("manageSchedule")?`<button class="btn btn-primary btn-sm" onclick="openSchedForm()">+ موعد</button>`:""}
+    </div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;justify-content:flex-start">${tabs}</div>
+  <div class="card">
+    <div class="card-title">مواعيد يوم ${dayName} (${items.length})</div>
+    ${list}
+  </div>`;
 }
 function openSchedForm(){
   if(!requirePerm("manageSchedule")) return;
-  const gOpts=cache.groups.map(g=>`<option value="${g.id}">${sanitize(g.name)}</option>`).join("");
-  openModal("موعد في الجدول",`
-    <div class="form-group"><label>التاريخ</label><input type="date" id="scD" value="${todayISO()}"></div>
-    <div class="form-group"><label>الوقت</label><input id="scT" placeholder="4:00 م"></div>
-    <div class="form-group"><label>المجموعة</label><select id="scG"><option value="">—</option>${gOpts}</select></div>
-    <div class="form-group"><label>ملاحظة</label><input id="scN"></div>
+  const gOpts=cache.groups.map(g=>{
+    const te=cache.teachers.find(x=>(g.teacherIds||[]).includes(x.id));
+    return `<option value="${g.id}">${sanitize(g.name)}${te?" / "+sanitize(te.name):""}</option>`;
+  }).join("");
+  const dayOpts=WEEK_DAYS.map(d=>`<option value="${d.id}" ${Number(scheduleDay)===d.id?"selected":""}>${d.label}</option>`).join("");
+  openModal("إضافة موعد للجدول",`
+    <div class="form-grid two">
+      <div class="form-group"><label>المجموعة</label>
+        <select id="scG"><option value="">— اختر —</option>${gOpts}</select></div>
+      <div class="form-group"><label>اليوم</label>
+        <select id="scDay">${dayOpts}</select></div>
+      <div class="form-group"><label>من الساعة</label>
+        <input type="time" id="scFrom" value="16:00"></div>
+      <div class="form-group"><label>إلى الساعة</label>
+        <input type="time" id="scTo" value="17:00"></div>
+    </div>
   `,`<button class="btn btn-outline btn-sm" onclick="closeModal()">إلغاء</button>
     <button class="btn btn-primary btn-sm" onclick="saveSched()">حفظ</button>`);
 }
 async function saveSched(){
   if(!requirePerm("manageSchedule")) return;
   const groupId=$("scG").value;
+  const day=Number($("scDay")?.value);
+  const timeFrom=($("scFrom")?.value||"").trim();
+  const timeTo=($("scTo")?.value||"").trim();
+  if(!groupId){toast("اختر المجموعة","err");return}
+  if(day!==0 && !day && day!==6){ /* 0 is Sunday valid */ }
+  if(Number.isNaN(day)){toast("اختر اليوم","err");return}
+  if(!timeFrom){toast("حدد من الساعة","err");return}
   const g=cache.groups.find(x=>x.id===groupId);
   const teacherId=(g?.teacherIds||[])[0]||"";
   try{
-    await db.collection("center_schedule").add({date:$("scD").value,time:$("scT").value.trim(),groupId,teacherId,note:$("scN").value.trim(),createdAt:Date.now()});
-    closeModal();toast("تم","ok");
+    await db.collection("center_schedule").add({
+      weekDay:day,
+      weekDays:[day],
+      time:timeFrom,
+      timeFrom,
+      timeTo:timeTo||"",
+      groupId,teacherId,
+      recurring:true,
+      createdAt:Date.now()
+    });
+    scheduleDay=day;
+    closeModal();toast("تم حفظ الموعد","ok");
   }catch(e){toast(e.message,"err")}
 }
+
+function openSessionFromSched(schedId){
+  if(!requirePerm("registerSession")) return;
+  const s=(cache.schedule||[]).find(x=>x.id===schedId);
+  if(!s){toast("الموعد غير موجود","err");return}
+  const time=s.timeFrom||s.time||"";
+  // openSessionForm supports preGroupId
+  openSessionForm(s.groupId);
+  setTimeout(()=>{
+    if($("seT")&&time) $("seT").value=time.length===5?time:time;
+    if($("seD")) $("seD").value=todayISO();
+  },80);
+}
+function openSchedEdit(id){
+  if(!requirePerm("manageSchedule")) return;
+  const s=(cache.schedule||[]).find(x=>x.id===id);
+  if(!s){toast("غير موجود","err");return}
+  const g=cache.groups.find(x=>x.id===s.groupId);
+  const gOpts=cache.groups.map(g=>{
+    const te=cache.teachers.find(x=>(g.teacherIds||[]).includes(x.id));
+    return `<option value="${g.id}" ${g.id===s.groupId?"selected":""}>${sanitize(g.name)}${te?" / "+sanitize(te.name):""}</option>`;
+  }).join("");
+  const dayVal=s.weekDay!=null?Number(s.weekDay):(Array.isArray(s.weekDays)&&s.weekDays.length?Number(s.weekDays[0]):todayWeekId());
+  const dayOpts=WEEK_DAYS.map(d=>`<option value="${d.id}" ${dayVal===d.id?"selected":""}>${d.label}</option>`).join("");
+  openModal("تعديل موعد الجدول",`
+    <div class="form-grid two">
+      <div class="form-group"><label>المجموعة</label>
+        <select id="scG"><option value="">—</option>${gOpts}</select></div>
+      <div class="form-group"><label>اليوم</label>
+        <select id="scDay">${dayOpts}</select></div>
+      <div class="form-group"><label>من الساعة</label>
+        <input type="time" id="scFrom" value="${sanitize(s.timeFrom||s.time||"16:00")}"></div>
+      <div class="form-group"><label>إلى الساعة</label>
+        <input type="time" id="scTo" value="${sanitize(s.timeTo||"")}"></div>
+    </div>
+  `,`<button class="btn btn-outline btn-sm" onclick="closeModal()">إلغاء</button>
+    <button class="btn btn-primary btn-sm" onclick="saveSchedEdit('${id}')">حفظ التعديل</button>`);
+}
+async function saveSchedEdit(id){
+  if(!requirePerm("manageSchedule")) return;
+  const groupId=$("scG").value;
+  const day=Number($("scDay")?.value);
+  const timeFrom=($("scFrom")?.value||"").trim();
+  const timeTo=($("scTo")?.value||"").trim();
+  if(!groupId){toast("اختر المجموعة","err");return}
+  if(Number.isNaN(day)){toast("اختر اليوم","err");return}
+  if(!timeFrom){toast("حدد من الساعة","err");return}
+  const g=cache.groups.find(x=>x.id===groupId);
+  const teacherId=(g?.teacherIds||[])[0]||"";
+  try{
+    await db.collection("center_schedule").doc(id).update({
+      weekDay:day, weekDays:[day],
+      time:timeFrom, timeFrom, timeTo:timeTo||"",
+      groupId, teacherId, updatedAt:Date.now()
+    });
+    scheduleDay=day;
+    closeModal();toast("تم التعديل","ok");
+  }catch(e){toast(e.message,"err")}
+}
+
 async function deleteSched(id){
   if(!can("manageSchedule")&&!can("deleteData")){toast("ليس لديك صلاحية","err");return}
-  if(!confirm("حذف؟")) return;
+  if(!confirm("حذف الموعد؟")) return;
   try{await db.collection("center_schedule").doc(id).delete()}catch(e){toast(e.message,"err")}
 }
+function exportScheduleReport(){
+  const rows=[];
+  WEEK_DAYS.forEach(d=>{
+    (cache.schedule||[]).filter(s=>scheduleOnDay(s,d.id)).forEach(s=>{
+      const g=cache.groups.find(x=>x.id===s.groupId);
+      const t=cache.teachers.find(x=>x.id===s.teacherId);
+      rows.push({اليوم:d.label,المجموعة:g?.name||"",المعلم:t?.name||"",من:s.timeFrom||s.time||"",إلى:s.timeTo||""});
+    });
+  });
+  if(!rows.length){toast("لا مواعيد","err");return}
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),"جدول");
+  XLSX.writeFile(wb,"جدول-الحصص.xlsx");
+  toast("تم التصدير","ok");
+}
+
 
 /* ----- مشرفون مساعدون ----- */
 function renderStaff(){
