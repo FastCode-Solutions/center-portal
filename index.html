@@ -187,22 +187,27 @@ const firebaseConfig={
 firebase.initializeApp(firebaseConfig);
 const auth=firebase.auth();
 const db=firebase.firestore();
-// تخزين محلي + مزامنة عند عودة الإنترنت
+// تخزين محلي + مزامنة (يُتخطى تلقائياً في وضع sandbox أو بدون صلاحية التخزين)
 try{
   db.settings({ merge:true, cacheSizeBytes: firebase.firestore.CACHE_SIZE_UNLIMITED });
 }catch(e){}
-db.enablePersistence({ synchronizeTabs: true }).catch(err=>{
-  if(err.code==="failed-precondition"){
-    console.warn("Persistence: tab أخرى مفتوحة");
-  }else if(err.code==="unimplemented"){
-    console.warn("Persistence غير مدعوم في هذا المتصفح");
-  }else{
-    console.warn("Persistence:", err);
+(function enableOfflineSafe(){
+  try{
+    // بيئات iframe/sandbox تمنع localStorage → لا نفع من persistence
+    const ls=window.localStorage;
+    if(!ls) return;
+    ls.setItem("__fs_test","1"); ls.removeItem("__fs_test");
+  }catch(e){
+    console.info("Offline cache: غير متاح في هذه البيئة (طبيعي في المعاينة/sandbox)");
+    return;
   }
-});
-// مؤشر حالة الاتصال
+  db.enablePersistence({ synchronizeTabs: true }).catch(err=>{
+    if(err && (err.code==="failed-precondition"||err.code==="unimplemented")) return;
+    // SecurityError وغيره — صامت
+  });
+})();
 window.addEventListener("online", ()=>{ try{ toast("تمت استعادة الاتصال — جاري المزامنة","ok") }catch(e){} });
-window.addEventListener("offline", ()=>{ try{ toast("وضع عدم الاتصال — البيانات تُحفظ محلياً","err") }catch(e){} });
+window.addEventListener("offline", ()=>{ try{ toast("وضع عدم الاتصال — العمل يستمر عند توفر الشبكة","err") }catch(e){} });
 let currentUser=null,profile=null,currentPage="home";
 let cache={groups:[],teachers:[],students:[],sessions:[],payments:[],schedule:[],staff:[]};
 let unsubscribers=[];
@@ -281,6 +286,53 @@ function hideLoading(){$("loadingOverlay").classList.remove("show")}
 function toast(msg,type){const el=$("toast");el.textContent=msg;el.className="toast show "+(type||"");setTimeout(()=>el.classList.remove("show"),3000)}
 function sanitize(s){return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
 function phoneToEmail(input){const t=String(input||"").trim();if(t.includes("@"))return t.toLowerCase();const d=t.replace(/[^0-9]/g,"");return(d||"user")+"@center.local"}
+function digitsOnly(p){return String(p||"").replace(/[^0-9]/g,"")}
+function welcomeMsg(role,name,phone,pass){
+  const center=centerMeta.name||"الأكاديمية";
+  const who=role==="teacher"?"المعلم":"الطالب";
+  return `السلام عليكم ${name||""} 👋
+تم تسجيلكم في *${center}* كـ${who}.
+
+📱 رقم الدخول: ${phone}
+🔐 كلمة المرور: ${pass}
+
+يمكنكم الدخول لمتابعة الجلسات والمستحقات والواجبات.
+مع تمنياتنا بالتوفيق 🌟`;
+}
+async function createPortalAccount(role,name,phone,pass){
+  const dig=digitsOnly(phone);
+  if(!dig||dig.length<8) throw new Error("رقم الموبايل مطلوب لإنشاء الحساب (8 أرقام فأكثر)");
+  let password=(pass||"").trim()||dig;
+  if(password.length<6) password=dig.length>=6?dig:(dig+"000000").slice(0,6);
+  const email=phoneToEmail(phone);
+  const sec=getSecondaryAuth();
+  let uid=null;
+  try{
+    const cred=await sec.createUserWithEmailAndPassword(email,password);
+    uid=cred.user.uid;
+  }catch(e){
+    if(e.code==="auth/email-already-in-use"){
+      throw new Error("هذا الرقم مسجّل مسبقاً كحساب دخول");
+    }
+    throw e;
+  }
+  try{
+    await db.collection("center_users").doc(uid).set({
+      name, phone:dig, email, role, active:true,
+      linkedType:role==="teacher"?"teacher":"student",
+      createdAt:Date.now(), createdBy:currentUser?.uid||null
+    });
+  }catch(e){ console.warn(e); }
+  try{ await sec.signOut(); }catch(e){}
+  return {uid, email, password, phone:dig};
+}
+function offerWhatsAppCreds(role,name,phone,pass){
+  const href=waLink(phone);
+  if(!href){toast("لا يوجد رقم واتساب صالح","err");return}
+  const text=encodeURIComponent(welcomeMsg(role,name,phone,pass));
+  window.open(href+(href.includes("?")?"&":"?")+"text="+text, "_blank");
+}
+
 function todayISO(){const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")}
 function monthKey(d){return (d||todayISO()).slice(0,7)}
 function fmtDate(v){if(!v)return"—";if(typeof v==="number")return new Date(v).toLocaleDateString("ar-EG");return String(v)}
@@ -1480,6 +1532,15 @@ function openTeacherForm(id){
         <input type="number" id="tRate" min="0" value="${t?.ratePerSession??50}"></div>
       <div class="form-group hide" id="tStuBox"><label>مبلغ لكل طالب حاضر</label>
         <input type="number" id="tRateStu" min="0" value="${t?.ratePerStudent??20}"></div>
+      ${!t?`
+      <div class="form-group" style="grid-column:1/-1;border-top:1px dashed var(--border);padding-top:10px;margin-top:4px">
+        <label class="check-row"><input type="checkbox" id="tCreateAcc" checked onchange="document.getElementById('tAccBox').classList.toggle('hide',!this.checked)"><span><b>إنشاء حساب دخول (الموبايل = اسم المستخدم)</b></span></label>
+      </div>
+      <div id="tAccBox" class="form-grid two" style="grid-column:1/-1">
+        <div class="form-group"><label>كلمة المرور</label>
+          <input id="tPass" type="text" placeholder="افتراضي = رقم الموبايل" autocomplete="new-password"></div>
+        <div class="form-group"><label class="check-row" style="margin-top:22px"><input type="checkbox" id="tSendWa" checked><span>إرسال واتساب ببيانات الدخول</span></label></div>
+      </div>`:""}
     </div>
   `,`<button class="btn btn-outline btn-sm" onclick="closeModal()">إلغاء</button>
     <button class="btn btn-primary btn-sm" onclick="saveTeacher('${id||""}')">حفظ</button>`);
@@ -1493,10 +1554,28 @@ async function saveTeacher(id){
   if(!name){toast("الاسم مطلوب","err");return}
   const data={name,phone:$("tPhone").value.trim(),billingCycle:$("tBilling").value,sessionsPerCycle:Math.max(1,Number($("tCycle")?.value)||8),monthlySalary:Number($("tSal")?.value)||0,payMode:$("tPayMode").value,ratePerSession:Number($("tRate")?.value)||0,ratePerStudent:Number($("tRateStu")?.value)||0,active:true,updatedAt:Date.now()};
   try{
+    showLoading("جاري الحفظ...");
+    let acc=null;
+    if(!id && $("tCreateAcc")?.checked){
+      acc=await createPortalAccount("teacher",name,data.phone,($("tPass")?.value||"").trim());
+      data.authUid=acc.uid;
+      data.hasLogin=true;
+      data.loginPhone=acc.phone;
+    }
     if(id) await db.collection("center_teachers").doc(id).update(data);
-    else await db.collection("center_teachers").add({...data,closedCycles:{},createdAt:Date.now()});
-    closeModal();toast("تم","ok");
-  }catch(e){toast(e.message,"err")}
+    else {
+      const ref=await db.collection("center_teachers").add({...data,closedCycles:{},createdAt:Date.now()});
+      if(acc){
+        try{ await db.collection("center_users").doc(acc.uid).update({linkedId:ref.id,linkedType:"teacher"}); }catch(e){}
+      }
+    }
+    closeModal();
+    toast(acc?"تم حفظ المعلم وإنشاء الحساب":"تم","ok");
+    if(acc && $("tSendWa")?.checked!==false){
+      setTimeout(()=>offerWhatsAppCreds("teacher",name,acc.phone,acc.password),400);
+    }
+  }catch(e){toast(e.message||e,"err")}
+  hideLoading();
 }
 
 function renderStudentsManage(){
@@ -1605,6 +1684,16 @@ function openStudentForm(id){
       <div class="form-group" style="grid-column:1/-1">
         <label class="check-row"><input type="checkbox" id="sAbs" ${en?.chargeOnAbsence?"checked":""}><span>محاسبة الغياب على الطالب</span></label>
       </div>
+      ${!s?`
+      <div class="form-group" style="grid-column:1/-1;border-top:1px dashed var(--border);padding-top:10px;margin-top:4px">
+        <label class="check-row"><input type="checkbox" id="sCreateAcc" checked onchange="document.getElementById('sAccBox').classList.toggle('hide',!this.checked)"><span><b>إنشاء حساب دخول (الموبايل = اسم المستخدم)</b></span></label>
+      </div>
+      <div id="sAccBox" class="form-grid two" style="grid-column:1/-1">
+        <div class="form-group"><label>كلمة المرور</label>
+          <input id="sPass" type="text" placeholder="افتراضي = رقم الموبايل" autocomplete="new-password">
+          <p style="font-size:11px;color:var(--muted);margin-top:4px">إن تُركت فارغة يُستخدم رقم الموبايل</p></div>
+        <div class="form-group"><label class="check-row" style="margin-top:22px"><input type="checkbox" id="sSendWa" checked><span>إرسال رسالة واتساب ببيانات الدخول</span></label></div>
+      </div>`:""}
     </div>
   `,`<button class="btn btn-outline btn-sm" onclick="closeModal()">إلغاء</button>
     <button class="btn btn-primary btn-sm" onclick="saveStudent('${id||""}')">حفظ</button>`);
@@ -1661,10 +1750,28 @@ async function saveStudent(id){
   data.enrollments=enrollments;
   try{
     showLoading("جاري الحفظ...");
+    let acc=null;
+    if(!id && $("sCreateAcc")?.checked){
+      const phone=data.phone;
+      const pass=($("sPass")?.value||"").trim();
+      acc=await createPortalAccount("student",name,phone,pass);
+      data.authUid=acc.uid;
+      data.hasLogin=true;
+      data.loginPhone=acc.phone;
+    }
     if(id) await db.collection("center_students").doc(id).update(data);
-    else await db.collection("center_students").add({...data,paused:false,createdAt:Date.now()});
-    closeModal();toast("تم حفظ الطالب والحساب","ok");
-  }catch(e){toast(e.message,"err")}
+    else {
+      const ref=await db.collection("center_students").add({...data,paused:false,createdAt:Date.now()});
+      if(acc){
+        try{ await db.collection("center_users").doc(acc.uid).update({linkedId:ref.id,linkedType:"student"}); }catch(e){}
+      }
+    }
+    closeModal();
+    toast(acc?"تم حفظ الطالب وإنشاء الحساب":"تم حفظ الطالب","ok");
+    if(acc && $("sSendWa")?.checked!==false){
+      setTimeout(()=>offerWhatsAppCreds("student",name,acc.phone,acc.password),400);
+    }
+  }catch(e){toast(e.message||e,"err")}
   hideLoading();
 }
 function downloadStudentsTemplate(){
